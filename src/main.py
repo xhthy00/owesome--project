@@ -7,8 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from common.core.config import get_settings
 from common.core.database import init_db
-from system.api.system import router as system_router
-from datasource.api.datasource import router as datasource_router
+from common.router import register_routers
+from common.middlewares.exception import register_exception_handlers
 
 settings = get_settings()
 
@@ -36,15 +36,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Register exception handlers
+register_exception_handlers(app)
+
 # Register routers
-app.include_router(system_router, prefix=settings.api_prefix)
-app.include_router(datasource_router, prefix=settings.api_prefix)
+register_routers(app)
 
 
 @app.get("/health")
 def health_check():
     """Health check endpoint."""
-    return {"status": "ok"}
+    return {"code": 200, "message": "ok", "data": {"status": "ok"}}
 
 
 if __name__ == "__main__":

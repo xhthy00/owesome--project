@@ -1,17 +1,16 @@
 """Datasource API routes."""
 
-import json
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from src.common.core.database import get_session
+from src.common.exceptions.base import NotFoundException
+from src.common.schemas.response import success_response, error_response
 from src.datasource.schemas import (
     ConnectionTestResult,
     DatasourceCreate,
-    DatasourceListResponse,
-    DatasourceResponse,
     DatasourceUpdate,
 )
 from src.datasource.crud import crud_datasource
@@ -20,32 +19,7 @@ from src.common.utils.aes import decrypt_conf
 router = APIRouter(prefix="/datasource", tags=["datasource"])
 
 
-def get_datasource_with_config(
-    datasource_id: int,
-    session: Session,
-) -> dict:
-    """Helper to get datasource with decrypted config."""
-    ds = crud_datasource.get_datasource_by_id(session, datasource_id)
-    if not ds:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Datasource not found",
-        )
-    config = decrypt_conf(ds.configuration) if ds.configuration else {}
-    return {
-        "id": ds.id,
-        "name": ds.name,
-        "description": ds.description,
-        "type": ds.type,
-        "type_name": ds.type_name,
-        "status": ds.status,
-        "create_time": ds.create_time,
-        "create_by": ds.create_by,
-        "config": config,
-    }
-
-
-@router.get("", response_model=DatasourceListResponse)
+@router.get("")
 def list_datasources(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
@@ -56,10 +30,8 @@ def list_datasources(
     items = crud_datasource.get_datasources(session, skip, limit, oid)
     total = crud_datasource.count_datasources(session, oid)
 
-    # Decrypt configs for response
     response_items = []
     for ds in items:
-        config = decrypt_conf(ds.configuration) if ds.configuration else {}
         response_items.append({
             "id": ds.id,
             "name": ds.name,
@@ -67,14 +39,19 @@ def list_datasources(
             "type": ds.type,
             "type_name": ds.type_name,
             "status": ds.status,
-            "create_time": ds.create_time,
+            "create_time": str(ds.create_time) if ds.create_time else None,
             "create_by": ds.create_by,
         })
 
-    return DatasourceListResponse(total=total, items=response_items)
+    return success_response(
+        data={
+            "total": total,
+            "items": response_items,
+        }
+    )
 
 
-@router.get("/{datasource_id}", response_model=DatasourceResponse)
+@router.get("/{datasource_id}")
 def get_datasource(
     datasource_id: int,
     session: Session = Depends(get_session),
@@ -82,20 +59,31 @@ def get_datasource(
     """Get datasource by ID."""
     ds = crud_datasource.get_datasource_by_id(session, datasource_id)
     if not ds:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Datasource not found",
-        )
-    return ds
+        raise NotFoundException("Datasource not found")
+
+    config = decrypt_conf(ds.configuration) if ds.configuration else {}
+
+    return success_response(
+        data={
+            "id": ds.id,
+            "name": ds.name,
+            "description": ds.description,
+            "type": ds.type,
+            "type_name": ds.type_name,
+            "status": ds.status,
+            "create_time": str(ds.create_time) if ds.create_time else None,
+            "create_by": ds.create_by,
+            "config": config,
+        }
+    )
 
 
-@router.post("", response_model=DatasourceResponse, status_code=status.HTTP_201_CREATED)
+@router.post("")
 def create_datasource(
     datasource_in: DatasourceCreate,
     session: Session = Depends(get_session),
 ):
     """Create a new datasource."""
-    # Build config dict
     config = datasource_in.config.model_dump()
 
     ds = crud_datasource.create_datasource(
@@ -105,20 +93,31 @@ def create_datasource(
         config=config,
         description=datasource_in.description,
     )
-    return ds
+
+    return success_response(
+        data={
+            "id": ds.id,
+            "name": ds.name,
+            "description": ds.description,
+            "type": ds.type,
+            "type_name": ds.type_name,
+            "status": ds.status,
+            "create_time": str(ds.create_time) if ds.create_time else None,
+            "create_by": ds.create_by,
+        },
+        message="Datasource created successfully"
+    )
 
 
-@router.put("/{datasource_id}", response_model=DatasourceResponse)
+@router.put("/{datasource_id}")
 def update_datasource(
     datasource_id: int,
     datasource_in: DatasourceUpdate,
     session: Session = Depends(get_session),
 ):
     """Update datasource."""
-    # Build update dict, excluding None values
     update_data = datasource_in.model_dump(exclude_unset=True)
 
-    # Handle config separately (rename to configuration)
     if "config" in update_data:
         config = update_data.pop("config")
         if config:
@@ -130,14 +129,24 @@ def update_datasource(
         **update_data,
     )
     if not ds:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Datasource not found",
-        )
-    return ds
+        raise NotFoundException("Datasource not found")
+
+    return success_response(
+        data={
+            "id": ds.id,
+            "name": ds.name,
+            "description": ds.description,
+            "type": ds.type,
+            "type_name": ds.type_name,
+            "status": ds.status,
+            "create_time": str(ds.create_time) if ds.create_time else None,
+            "create_by": ds.create_by,
+        },
+        message="Datasource updated successfully"
+    )
 
 
-@router.delete("/{datasource_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{datasource_id}")
 def delete_datasource(
     datasource_id: int,
     session: Session = Depends(get_session),
@@ -145,13 +154,15 @@ def delete_datasource(
     """Delete datasource."""
     success = crud_datasource.delete_datasource(session, datasource_id)
     if not success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Datasource not found",
-        )
+        raise NotFoundException("Datasource not found")
+
+    return success_response(
+        data={"id": datasource_id},
+        message="Datasource deleted successfully"
+    )
 
 
-@router.post("/{datasource_id}/test-connection", response_model=ConnectionTestResult)
+@router.post("/{datasource_id}/test-connection")
 def test_connection(
     datasource_id: int,
     session: Session = Depends(get_session),
@@ -159,17 +170,25 @@ def test_connection(
     """Test datasource connection."""
     ds = crud_datasource.get_datasource_by_id(session, datasource_id)
     if not ds:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Datasource not found",
-        )
+        raise NotFoundException("Datasource not found")
 
     config = decrypt_conf(ds.configuration) if ds.configuration else {}
 
     try:
-        # Import here to avoid circular dependency
         from src.datasource.db.db import test_db_connection
         success, message, version = test_db_connection(ds.type, config)
-        return ConnectionTestResult(success=success, message=message, version=version)
+        return success_response(
+            data={
+                "success": success,
+                "message": message,
+                "version": version,
+            }
+        )
     except Exception as e:
-        return ConnectionTestResult(success=False, message=str(e))
+        return success_response(
+            data={
+                "success": False,
+                "message": str(e),
+                "version": None,
+            }
+        )

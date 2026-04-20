@@ -1,11 +1,13 @@
 """System API routes (auth, users)."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
 from common.core.database import get_session
 from common.core.security import create_access_token
+from common.exceptions.base import UnauthorizedException, BadRequestException, NotFoundException
+from common.schemas.response import success_response
 from system.schemas import UserCreate, UserResponse, TokenResponse
 from system.crud.crud_user import (
     get_user_by_account,
@@ -28,29 +30,20 @@ def get_current_user(
 
     payload = decode_access_token(token)
     if payload is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-        )
+        raise UnauthorizedException("Invalid or expired token")
     user_id = int(payload.get("sub"))
     user = get_user_by_id(session, user_id)
     if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-        )
+        raise NotFoundException("User not found")
     return user
 
 
-@router.post("/register", response_model=UserResponse)
+@router.post("/register")
 def register(user_in: UserCreate, session: Session = Depends(get_session)):
     """Register a new user."""
     existing = get_user_by_account(session, user_in.account)
     if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Account already exists",
-        )
+        raise BadRequestException("Account already exists")
     user = create_user(
         session,
         account=user_in.account,
@@ -60,10 +53,23 @@ def register(user_in: UserCreate, session: Session = Depends(get_session)):
         oid=user_in.oid,
         language=user_in.language,
     )
-    return user
+    return success_response(
+        data={
+            "id": user.id,
+            "account": user.account,
+            "name": user.name,
+            "email": user.email,
+            "oid": user.oid,
+            "status": user.status,
+            "language": user.language,
+            "origin": user.origin,
+            "create_time": user.create_time,
+        },
+        message="User registered successfully"
+    )
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login")
 def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     session: Session = Depends(get_session),
@@ -71,15 +77,27 @@ def login(
     """Login and get access token."""
     user = authenticate(session, form_data.username, form_data.password)
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect account or password",
-        )
+        raise UnauthorizedException("Incorrect account or password")
     access_token = create_access_token(user.id)
-    return TokenResponse(access_token=access_token)
+    return success_response(
+        data={"access_token": access_token, "token_type": "bearer"},
+        message="Login successful"
+    )
 
 
-@router.get("/me", response_model=UserResponse)
+@router.get("/me")
 def get_me(current_user = Depends(get_current_user)):
     """Get current user info."""
-    return current_user
+    return success_response(
+        data={
+            "id": current_user.id,
+            "account": current_user.account,
+            "name": current_user.name,
+            "email": current_user.email,
+            "oid": current_user.oid,
+            "status": current_user.status,
+            "language": current_user.language,
+            "origin": current_user.origin,
+            "create_time": current_user.create_time,
+        }
+    )
