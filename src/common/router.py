@@ -2,6 +2,7 @@
 
 from system.api.system import router as system_router
 from datasource.api.datasource import router as datasource_router
+from chat.api.chat import router as chat_router
 
 
 def get_all_routers() -> list:
@@ -9,6 +10,7 @@ def get_all_routers() -> list:
     return [
         system_router,
         datasource_router,
+        chat_router,
     ]
 
 

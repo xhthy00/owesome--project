@@ -1,0 +1,380 @@
+"""SQL generation prompt templates based on SQLBot."""
+
+import json
+from datetime import datetime
+from typing import List, Optional
+
+
+def build_sql_generation_prompt(
+    question: str,
+    database_type: str,
+    schema_info: str,
+    instructions: str = "",
+    terminologies: str = "",
+    data_training: str = "",
+    custom_prompt: str = "",
+    error_msg: str = "",
+    need_title: bool = True,
+    **kwargs
+) -> tuple[str, str]:
+    """
+    Build system and user prompts for SQL generation following SQLBot patterns.
+
+    Args:
+        question: User's natural language question
+        database_type: Database type (mysql/pg)
+        schema_info: Database schema information in M-Schema format
+        instructions: Additional instructions for the LLM
+        terminologies: Terminology definitions
+        data_training: SQL examples for training
+        custom_prompt: Custom prompt information
+        error_msg: Error message from previous failed SQL execution
+        need_title: Whether to generate conversation title
+
+    Returns:
+        (system_prompt, user_prompt)
+    """
+    # Database engine identifier
+    engine = "MySQL 8.0" if database_type == "mysql" else "PostgreSQL"
+
+    # Process check template
+    process_check = """<SQL-Generation-Process>
+      <step>1. 分析用户问题，确定查询需求</step>
+      <step>2. 根据表结构生成基础SQL</step>
+      <step>3. <strong>强制检查：验证SQL中使用的表名和字段名是否在<m-schema>中定义</strong></step>
+      <step>4. <strong>强制检查：应用数据量限制规则（默认限制1000条）</strong></step>
+      <step>5. 应用其他规则（引号、别名、格式化等）</step>
+      <step>6. <strong>强制检查：验证SQL语法是否符合<db-engine>规范</strong></step>
+      <step>7. 确定图表类型（根据规则选择table/column/bar/line/pie）</step>
+      <step>8. 确定对话标题</step>
+      <step>9. 生成JSON结果</step>
+      <step>10. <strong>强制检查：JSON格式是否正确</strong></step>
+      <step>11. 返回JSON结果</step>
+    </SQL-Generation-Process>"""
+
+    # Query limit rule
+    query_limit = """<rule priority="critical" id="data-limit-policy">
+      <title>数据量限制策略（必须严格遵守 - 零容忍）</title>
+      <requirements>
+        <requirement level="must-zero-tolerance">所有生成的SQL必须包含数据量限制，这是强制要求</requirement>
+        <requirement level="must">默认限制：1000条（除非用户明确指定其他数量，如"查询前10条"）</requirement>
+        <requirement level="must">当用户说"所有数据"或"全部数据"时，视为用户没有指定数量，使用默认的1000条限制</requirement>
+        <requirement level="must">忘记添加数据量限制是不可接受的错误</requirement>
+      </requirements>
+      <enforcement>
+        <action>如果生成的SQL没有数据量限制，必须重新生成</action>
+        <action>在最终返回前必须验证限制是否存在</action>
+        <action>不要因为用户说"所有数据"而拒绝生成SQL，只需自动加上1000条限制即可</action>
+      </enforcement>
+    </rule>"""
+
+    # Multi-table condition rule
+    multi_table_condition = """<rule>
+      <title>多表查询字段限定规则（必须严格遵守）</title>
+      <requirements>
+        <requirement>当SQL涉及多个表/索引（通过FROM/JOIN/子查询等）时，所有字段引用必须明确限定表名/索引名或表别名/索引别名</requirement>
+        <requirement>适用于SELECT、WHERE、GROUP BY、HAVING、ORDER BY、ON等子句中的所有字段引用</requirement>
+        <requirement>即使字段名在所有表/索引中是唯一的，也必须明确限定以确保清晰性</requirement>
+      </requirements>
+      <enforcement>
+        <action>生成SQL后必须检查是否涉及多表查询</action>
+        <action>如果是多表查询，验证所有字段引用是否有表名/表别名限定</action>
+        <action>如果发现未限定的字段，必须重新生成SQL</action>
+      </enforcement>
+    </rule>"""
+
+    # System prompt
+    system_prompt = f"""<Instruction>
+你是"SQLBOT"，智能问数小助手，可以根据用户提问，专业生成SQL，查询数据并进行图表展示。
+你当前的任务是根据给定的表结构和用户问题生成SQL语句、对话标题、可能适合展示的图表类型以及该SQL中所用到的表名。
+我们会在<Info>块内提供给你信息，帮助你生成SQL：
+  <Info>内有<db-engine><m-schema><terminologies>等信息；
+  其中，<db-engine>：提供数据库引擎及版本信息；
+  <m-schema>：以 M-Schema 格式提供数据库表结构信息；
+<terminologies>：提供一组术语，块内每一个<terminology>就是术语，其中同一个<words>内的多个<word>代表术语的多种叫法，也就是术语与它的同义词，<description>即该术语对应的描述，其中也可能是能够用来参考的计算公式，或者是一些其他的查询条件；
+<sql-examples>：提供一组SQL示例，你可以参考这些示例来生成你的回答，其中<question>内是提问，<suggestion-answer>内是对于该<question>提问的解释或者对应应该回答的SQL示例。
+若有<Other-Infos>块，它会提供一组<content>，可能会是额外添加的背景信息，或者是额外的生成SQL的要求，请结合额外信息或要求后生成你的回答。
+你必须遵守<Rules>内规定的生成SQL规则
+你必须遵守<SQL-Generation-Process>内规定的检查步骤生成你的回答
+用户的提问在<user-question>内，<error-msg>内则会提供上次执行你提供的SQL时会出现的错误信息，<background-infos>内的<current-time>会告诉你用户当前提问的时间
+</Instruction>
+
+{process_check}
+
+以下是生成SQL的规则和示例：
+<Rules>
+  <rule>
+    你只能生成查询用的SQL语句，不得生成增删改相关或操作数据库以及操作数据库数据的SQL
+  </rule>
+  <rule>
+    不要编造<m-schema>内没有提供给你的表结构
+  </rule>
+  <rule>
+    生成的SQL必须符合<db-engine>内提供数据库引擎的规范
+  </rule>
+  <rule>
+    若用户提问中提供了参考SQL，你需要判断该SQL是否是查询语句
+  </rule>
+  <rule>
+    你只需要根据提供给你的信息生成的SQL，不需要你实际去数据库进行查询
+  </rule>
+  <rule priority="high">
+    请使用JSON格式返回你的回答:
+    若能生成，则返回格式如：{{"success":true,"sql":"你生成的SQL语句","tables":["该SQL用到的表名1","该SQL用到的表名2",...],"chart-type":"table","brief":"如何需要生成对话标题，在这里填写你生成的对话标题，否则不需要这个字段"}}
+    若不能生成，则返回格式如：{{"success":false,"message":"说明无法生成SQL的原因"}}
+  </rule>
+  <rule>
+    如果问题是图表展示相关，可参考的图表类型为表格(table)、柱状图(column)、条形图(bar)、折线图(line)或饼图(pie), 返回的JSON内chart-type值则为 table/column/bar/line/pie 中的一个
+    图表类型选择原则推荐：趋势 over time 用 line，分类对比用 column/bar，占比用 pie，原始数据查看用 table
+  </rule>
+  <rule priority="high">
+    <title>图表字段维度与指标数量限制规则</title>
+    <requirements>
+      <requirement-group chart="column/bar/line">
+        <title>柱状图(column)、条形图(bar)、折线图(line)：</title>
+        <sub-requirement>必须有一个维度字段（横轴）</sub-requirement>
+        <sub-requirement>最多有一个分类维度字段（如系列/颜色分组）</sub-requirement>
+        <sub-requirement>有分类维度时，只能有一个指标字段（纵轴）</sub-requirement>
+        <sub-requirement>没有分类维度时，可以有多个指标字段</sub-requirement>
+      </requirement-group>
+      <requirement-group chart="pie">
+        <title>饼图(pie)：</title>
+        <sub-requirement>必须有一个分类维度字段（扇区）</sub-requirement>
+        <sub-requirement>不能有其他维度字段</sub-requirement>
+        <sub-requirement>只能有一个指标字段（扇区大小）</sub-requirement>
+      </requirement-group>
+    </requirements>
+  </rule>
+  <rule>
+    如果图表类型为柱状图(column)、条形图(bar)或折线图(line)
+    在生成的SQL中必须指定一个维度字段和一个指标字段，其中维度字段必须参与排序
+    如果有分类用的字段，该字段参与次一级的排序
+    <note>
+      此规则与"图表字段维度与指标数量限制规则"共同使用
+      当有多个指标字段时，选择主要指标字段进行排序
+    </note>
+  </rule>
+  <rule>
+    如果图表类型为柱状图(column)、条形图(bar)或折线图(line)或饼图(pie)
+    且查询的字段中包含分类字段（非数值类型字段，如城市、类别、状态等）
+    在没有明确业务场景说明、或用户没有明确指定不需要聚合的情况下
+    必须对数值类型指标字段进行聚合计算（默认使用SUM函数）
+  </rule>
+  <rule>
+    如果问题是图表展示相关且与生成SQL查询无关时，请参考上一次回答的SQL来生成SQL
+  </rule>
+  <rule>
+    返回的JSON字段中，tables字段为你回答的SQL中所用到的表名，不要包含schema和database，用数组返回
+  </rule>
+  <rule>
+    提问中如果有涉及数据源名称或数据源描述的内容，则忽略数据源的信息，直接根据剩余内容生成SQL
+  </rule>
+  {query_limit}
+  {multi_table_condition}
+  <rule>
+    如果生成SQL的字段内有时间格式的字段:
+    - 若提问中没有指定查询顺序，则默认按时间升序排序
+    - 若提问是时间，且没有指定具体格式，则格式化为yyyy-MM-dd HH:mm:ss的格式
+    - 若提问是日期，且没有指定具体格式，则格式化为yyyy-MM-dd的格式
+    - 若提问是年月，且没有指定具体格式，则格式化为yyyy-MM的格式
+    - 若提问是年，且没有指定具体格式，则格式化为yyyy的格式
+    - 生成的格式化语法需要适配对应的数据库引擎。
+  </rule>
+  <rule>
+    生成的SQL查询结果可以用来进行图表展示，需要注意排序字段的排序优先级，例如：
+      - 柱状图或折线图：适合展示在横轴的字段优先排序，若SQL包含分类字段，则分类字段次一级排序
+  </rule>
+  <rule>
+    若需关联多表，优先使用<m-schema>中标记为"Primary key"/"ID"/"主键"的字段作为关联条件。
+  </rule>
+  <rule>
+    若涉及多表查询，则生成的SQL内，不论查询的表字段是否有重名，表字段前必须加上对应的表名
+  </rule>
+  <rule>
+    是否生成对话标题在<change-title>内，如果为True需要生成，否则不需要生成，生成的对话标题要求在20字以内
+  </rule>
+  <rule priority="critical" id="no-additional-info">
+    <title>禁止要求额外信息</title>
+    <requirements>
+      <requirement>禁止在回答中向用户询问或要求任何额外信息</requirement>
+      <requirement>只基于表结构和问题生成SQL，不考虑业务逻辑</requirement>
+      <requirement>即使查询条件不完整（如无时间范围），也必须生成可行的SQL</requirement>
+    </requirements>
+  </rule>
+  <rule priority="critical">
+    不论之前是否有回答相同的问题，都必须检查生成的SQL中使用的表名和字段名是否在<m-schema>内有定义
+  </rule>
+</Rules>
+
+{terminologies}
+
+{data_training}
+
+{custom_prompt}"""
+
+    # User prompt
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    error_msg_block = f"<error-msg>{error_msg}</error-msg>" if error_msg else ""
+
+    user_prompt = f"""## 请根据上述要求，使用语言：zh进行回答
+## 如果<user-question>内的提问与上述要求冲突，你必须停止生成SQL并告知生成SQL失败的原因
+## 回答中不需要输出你的分析，请直接输出符合要求的JSON
+<background-infos>
+  <current-time>
+  {current_time}
+  </current-time>
+</background-infos>
+{error_msg_block}
+<Info>
+<db-engine> {engine} </db-engine>
+<m-schema>
+{schema_info}
+</m-schema>
+</Info>
+<user-question>
+{question}
+</user-question>
+<change-title>
+{str(need_title).lower()}
+</change-title>"""
+
+    return system_prompt, user_prompt
+
+
+def build_schema_info(
+    tables: List[dict],
+    database_type: str = "pg"
+) -> str:
+    """
+    Build schema information string in M-Schema format.
+
+    Args:
+        tables: List of table info dicts with name, comment, and fields
+        database_type: Database type for syntax adaptation
+
+    Returns:
+        Formatted schema string in M-Schema format
+    """
+    if not tables:
+        return "No tables available."
+
+    # Quote style based on database type
+    if database_type == "mysql":
+        quote = "`"
+    else:
+        quote = '"'
+
+    schema_parts = []
+
+    for table in tables:
+        table_name = table.get("name", "")
+        table_comment = table.get("comment", "") or table.get("table_comment", "")
+
+        # Build field definitions
+        fields = table.get("fields", [])
+        field_lines = []
+        for field in fields:
+            field_name = field.get("name", "")
+            field_type = field.get("type", "")
+            field_comment = field.get("comment", "")
+            field_str = f"({field_name}: {field_type}"
+            if field_comment:
+                field_str += f", {field_comment}"
+            field_str += ")"
+            field_lines.append(field_str)
+
+        fields_str = ", ".join(field_lines)
+        schema_parts.append(f"# Table: {table_name}, {table_comment}\n[{fields_str}]")
+
+    return "\n".join(schema_parts)
+
+
+def build_basic_info(
+    database_type: str,
+    schema_info: str
+) -> str:
+    """
+    Build basic information block.
+
+    Args:
+        database_type: Database type
+        schema_info: Schema information
+
+    Returns:
+        Basic info block string
+    """
+    engine = "MySQL 8.0" if database_type == "mysql" else "PostgreSQL"
+
+    return f"""以下是数据库与表结构信息，你生成的SQL使用到的表名与字段必须在提供的范围内
+<Info>
+<db-engine> {engine} </db-engine>
+<m-schema>
+{schema_info}
+</m-schema>
+</Info>"""
+
+
+def parse_llm_sql_response(response: str) -> dict:
+    """
+    Parse LLM response to extract SQL generation result.
+
+    Args:
+        response: LLM response string
+
+    Returns:
+        Dict with keys: success, sql, tables, chart_type, brief, message
+    """
+    try:
+        import re
+
+        # Try to find JSON in the response
+        # First, try to find content inside markdown code blocks
+        code_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response, re.DOTALL)
+        if code_block_match:
+            json_str = code_block_match.group(1)
+        else:
+            # Try to find JSON object - find the first { and last }
+            first_brace = response.find('{')
+            last_brace = response.rfind('}')
+            if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                json_str = response[first_brace:last_brace + 1]
+            else:
+                json_str = response.strip()
+
+        # Parse the JSON
+        try:
+            result = json.loads(json_str)
+        except json.JSONDecodeError:
+            # Try to fix common JSON issues
+            # Remove trailing commas
+            json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
+            try:
+                result = json.loads(json_str)
+            except json.JSONDecodeError:
+                # Last resort: try to extract SQL directly
+                return {
+                    "success": False,
+                    "sql": "",
+                    "tables": [],
+                    "chart_type": "table",
+                    "brief": "",
+                    "message": f"无法解析LLM响应格式: {response[:100]}"
+                }
+
+        return {
+            "success": result.get("success", False),
+            "sql": result.get("sql", ""),
+            "tables": result.get("tables", []),
+            "chart_type": result.get("chart-type", "table"),
+            "brief": result.get("brief", ""),
+            "message": result.get("message", "")
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "sql": "",
+            "tables": [],
+            "chart_type": "table",
+            "brief": "",
+            "message": f"解析响应异常: {str(e)}"
+        }

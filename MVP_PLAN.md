@@ -161,14 +161,15 @@ CACHE 1
 
 ---
 
-### Phase 2：核心链路（预计 2-3 周）
+### Phase 2：核心链路
 
-#### 2.1 LLM 集成
-- [ ] LLM 接口抽象（支持 OpenAI / vLLM / Ollama）
+#### 2.1 LLM 集成（langchain）
+- [ ] LLM 接口抽象（支持 OpenAI / Anthropic标准类型接口）
 - [ ] Prompt 模板设计
 - [ ] LLM 调用封装
 
 #### 2.2 自然语言 → SQL 生成
+具体按照/Users/tanghaoyu/develop/git-repo/opensource/SQLBot-main/backend这个工程目录下的实现逻辑，prompt模版复用这个工程的
 - [ ] 根据数据源 Schema 构建 Prompt
 - [ ] 调用 LLM 生成 SQL
 - [ ] SQL 语法校验
