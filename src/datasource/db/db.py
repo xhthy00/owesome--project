@@ -1,7 +1,10 @@
-"""Database connection testing and execution."""
+"""Database connection testing and execution based on SQLBot patterns."""
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, date, time, timedelta
+from decimal import Decimal
 import logging
+import base64
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +87,10 @@ def execute_sql(db_type: str, config: Dict[str, Any], sql: str) -> Tuple[bool, s
     Returns:
         (success, message, result)
     """
+    # Check if SQL is read-only
+    if not check_sql_read(sql, db_type):
+        return False, "SQL can only contain read operations (SELECT)", None
+
     if db_type == "pg":
         return execute_postgresql_sql(config, sql)
     elif db_type == "mysql":
@@ -92,11 +99,51 @@ def execute_sql(db_type: str, config: Dict[str, Any], sql: str) -> Tuple[bool, s
         return False, f"Unsupported database type: {db_type}", None
 
 
+def check_sql_read(sql: str, db_type: str) -> bool:
+    """
+    Check if SQL is read-only using sqlglot.
+
+    Args:
+        sql: SQL statement to check
+        db_type: Database type (pg/mysql)
+
+    Returns:
+        True if SQL is read-only, False otherwise
+    """
+    try:
+        from sqlglot import parse
+        from sqlglot import expressions as exp
+
+        dialect = "mysql" if db_type == "mysql" else None
+
+        statements = parse(sql, dialect=dialect)
+
+        if not statements:
+            return False
+
+        write_types = (
+            exp.Insert, exp.Update, exp.Delete,
+            exp.Create, exp.Drop, exp.Alter,
+            exp.Merge, exp.Copy
+        )
+
+        for stmt in statements:
+            if stmt is None:
+                continue
+            if isinstance(stmt, write_types):
+                return False
+
+        return True
+
+    except Exception as e:
+        logger.warning(f"SQL parse check failed: {e}, allowing by default")
+        return True  # Allow if parse fails, let execution handle errors
+
+
 def execute_postgresql_sql(config: Dict[str, Any], sql: str) -> Tuple[bool, str, Any]:
-    """Execute SQL on PostgreSQL."""
+    """Execute SQL on PostgreSQL with proper result formatting."""
     try:
         import psycopg2
-        import json
 
         conn = psycopg2.connect(
             host=config.get("host", "localhost"),
@@ -114,9 +161,16 @@ def execute_postgresql_sql(config: Dict[str, Any], sql: str) -> Tuple[bool, str,
         if cursor.description:
             columns = [desc[0] for desc in cursor.description]
             rows = cursor.fetchall()
+
+            # Convert values to JSON-serializable types
+            converted_rows = []
+            for row in rows:
+                converted_row = [convert_value(v) for v in row]
+                converted_rows.append(converted_row)
+
             result = {
                 "columns": columns,
-                "rows": [list(row) for row in rows],
+                "rows": converted_rows,
                 "row_count": len(rows),
             }
         else:
@@ -132,7 +186,7 @@ def execute_postgresql_sql(config: Dict[str, Any], sql: str) -> Tuple[bool, str,
 
 
 def execute_mysql_sql(config: Dict[str, Any], sql: str) -> Tuple[bool, str, Any]:
-    """Execute SQL on MySQL."""
+    """Execute SQL on MySQL with proper result formatting."""
     try:
         import pymysql
 
@@ -152,9 +206,16 @@ def execute_mysql_sql(config: Dict[str, Any], sql: str) -> Tuple[bool, str, Any]
         if cursor.description:
             columns = [desc[0] for desc in cursor.description]
             rows = cursor.fetchall()
+
+            # Convert values to JSON-serializable types
+            converted_rows = []
+            for row in rows:
+                converted_row = [convert_value(v) for v in row]
+                converted_rows.append(converted_row)
+
             result = {
                 "columns": columns,
-                "rows": [list(row) for row in rows],
+                "rows": converted_rows,
                 "row_count": len(rows),
             }
         else:
@@ -167,6 +228,68 @@ def execute_mysql_sql(config: Dict[str, Any], sql: str) -> Tuple[bool, str, Any]
         return True, "Success", result
     except Exception as e:
         return False, f"SQL execution failed: {str(e)}", None
+
+
+def convert_value(value: Any, datetime_format: str = 'space') -> Any:
+    """
+    Convert Python value to JSON-serializable type.
+
+    Args:
+        value: The value to convert
+        datetime_format: DateTime format ('iso' or 'space')
+
+    Returns:
+        JSON-serializable value
+    """
+    if value is None:
+        return None
+
+    # Handle bytes type (including BIT fields)
+    if isinstance(value, bytes):
+        if len(value) <= 8:
+            try:
+                int_val = int.from_bytes(value, 'big')
+                if int_val in (0, 1):
+                    return bool(int_val)
+                else:
+                    return int_val
+            except:
+                pass
+
+        try:
+            return value.decode('utf-8')
+        except UnicodeDecodeError:
+            if any(b < 32 and b not in (9, 10, 13) for b in value):
+                return f"0x{value.hex()}"
+            else:
+                return value.decode('latin-1')
+
+    elif isinstance(value, bytearray):
+        return convert_value(bytes(value))
+
+    elif isinstance(value, timedelta):
+        return str(value)
+
+    elif isinstance(value, Decimal):
+        return float(value)
+
+    elif isinstance(value, datetime):
+        if datetime_format == 'iso':
+            return value.isoformat()
+        else:
+            if value.hour == 0 and value.minute == 0 and value.second == 0 and value.microsecond == 0:
+                return value.strftime('%Y-%m-%d')
+            else:
+                return value.strftime('%Y-%m-%d %H:%M:%S')
+
+    elif isinstance(value, date):
+        return value.isoformat()
+
+    elif isinstance(value, time):
+        return str(value)
+
+    else:
+        return value
 
 
 def get_schema_info(db_type: str, config: Dict[str, Any]) -> list:
