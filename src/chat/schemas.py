@@ -1,9 +1,9 @@
 """Chat schemas for request/response validation."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Literal, Optional
 
+from pydantic import BaseModel, Field
 
 # ============== Conversation Schemas ==============
 
@@ -76,6 +76,12 @@ class ConversationRecordResponse(BaseModel):
     create_time: Optional[datetime] = None
     reasoning: Optional[str] = ""
     steps: List[Dict[str, Any]] = []
+    agent_mode: Optional[str] = None
+    plans: Optional[List[str]] = None
+    sub_task_agents: Optional[List[str]] = None
+    plan_states: Optional[List[Dict[str, Any]]] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    summary: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -101,6 +107,22 @@ class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=1000, description="User's natural language question")
     datasource_id: int = Field(..., description="ID of the datasource to query")
     conversation_id: Optional[int] = Field(None, description="Conversation ID for context")
+    agent_mode: Literal["agent", "team", "legacy"] = Field(
+        default="agent",
+        description=(
+            "Which backend runs the chat-stream: "
+            "'agent' (default, ReAct DataAnalyst), "
+            "'team' (DataAnalyst → Charter → Summarizer 线性 DAG), "
+            "或 'legacy' (single-shot SQLGenerator)."
+        ),
+    )
+    enable_tool_agent: bool = Field(
+        default=True,
+        description=(
+            "Only for team mode. True: allow Planner to route sub-task to ToolExpert; "
+            "False: force all sub-tasks to DataAnalyst (Phase C compatible)."
+        ),
+    )
 
 
 class SQLValidationRequest(BaseModel):

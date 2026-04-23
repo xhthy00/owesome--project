@@ -29,6 +29,11 @@
     "delete_confirm": "确定删除该对话？",
     "send": "发送",
     "result": "结果",
+    "result_tab": {
+      "chart": "图表",
+      "sql": "SQL",
+      "data": "数据"
+    },
     "rows": "共 {n} 行",
     "execution_failed": "执行失败",
     "thinking": "思考过程",
@@ -48,7 +53,24 @@
       "pie": "饼图"
     },
     "show_label": "显示数值",
-    "hide_label": "隐藏数值"
+    "hide_label": "隐藏数值",
+    "agent_mode": {
+      "agent": "单体分析",
+      "team": "团队协作",
+      "legacy": "兼容模式"
+    },
+    "plan": "执行计划",
+    "plan_steps": "{n} 步",
+    "sub_task_label": "子任务 {n}",
+    "tool_calls": "工具调用",
+    "tool_calls_count": "{n} 次",
+    "thought": "思考",
+    "observation": "观察",
+    "summary": "综合结论"
+    ,
+    "tool_agent_toggle": "启用 ToolExpert",
+    "enabled": "开",
+    "disabled": "关"
   },
   "datasource": {
     "title": "数据源管理",

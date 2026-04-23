@@ -1,34 +1,23 @@
 <script lang="ts" setup>
 import { ref, computed } from 'vue'
-import { Promotion, Connection } from '@element-plus/icons-vue'
-import type { DatasourceItem } from '@/api/datasource'
+import { Top, Loading } from '@element-plus/icons-vue'
 
 const props = defineProps<{
   disabled?: boolean
   placeholder?: string
-  datasources: DatasourceItem[]
-  modelValue?: number
-  datasourceLocked?: boolean
+  canSendExtraCheck?: boolean
 }>()
 
 const emit = defineEmits<{
   send: [text: string]
-  'update:modelValue': [v: number | undefined]
 }>()
 
 const text = ref('')
 const inputRef = ref()
 
-const selected = computed({
-  get: () => props.modelValue,
-  set: (v: number | undefined) => emit('update:modelValue', v),
-})
-
-const selectedDs = computed(() =>
-  props.datasources.find((d) => d.id === props.modelValue)
+const canSend = computed(
+  () => !!text.value.trim() && !props.disabled && (props.canSendExtraCheck ?? true)
 )
-
-const canSend = computed(() => !!text.value.trim() && !props.disabled && !!selected.value)
 
 const onSend = () => {
   if (!canSend.value) return
@@ -45,35 +34,18 @@ const onKeydown = (evt: Event) => {
 }
 
 const focus = () => inputRef.value?.focus?.()
+
+defineExpose({
+  setText: (v: string) => {
+    text.value = v
+    focus()
+  },
+})
 </script>
 
 <template>
-  <div class="chat-footer">
-    <div class="input-wrapper" @click="focus">
-      <div class="datasource-bar">
-        <template v-if="selectedDs">
-          <span class="label">{{ $t('chat.selected_datasource') }}：</span>
-          <el-icon :size="14" class="ds-icon"><Connection /></el-icon>
-          <span class="name ellipsis">{{ selectedDs.name }}</span>
-        </template>
-        <template v-else>
-          <el-select
-            v-model="selected"
-            :placeholder="$t('chat.select_datasource')"
-            :disabled="datasourceLocked"
-            size="small"
-            class="ds-select"
-          >
-            <el-option
-              v-for="ds in datasources"
-              :key="ds.id"
-              :label="ds.name"
-              :value="ds.id"
-            />
-          </el-select>
-        </template>
-      </div>
-
+  <div class="chat-input-panel">
+    <div class="input-card" :class="{ disabled }" @click="focus">
       <el-input
         ref="inputRef"
         v-model="text"
@@ -86,76 +58,55 @@ const focus = () => inputRef.value?.focus?.()
         @keydown="onKeydown"
       />
 
-      <el-button
-        circle
-        type="primary"
-        class="input-icon"
-        :disabled="!canSend"
-        @click.stop="onSend"
-      >
-        <el-icon :size="16"><Promotion /></el-icon>
-      </el-button>
+      <div class="input-toolbar">
+        <div class="left">
+          <span class="hint">Enter 发送 / Shift + Enter 换行</span>
+        </div>
+        <div class="right">
+          <button
+            class="send-btn"
+            :class="{ enabled: canSend, loading: disabled }"
+            :disabled="!canSend"
+            @click.stop="onSend"
+          >
+            <el-icon v-if="disabled" :size="16" class="is-loading"><Loading /></el-icon>
+            <el-icon v-else :size="16"><Top /></el-icon>
+          </button>
+        </div>
+      </div>
     </div>
+    <div class="footer-tip">DB-GPT 风格 · 输出可能存在错误，请核实关键数据。</div>
   </div>
 </template>
 
 <style lang="less" scoped>
-.chat-footer {
-  min-height: calc(120px + 16px);
-  max-height: calc(300px + 16px);
-  height: fit-content;
-  padding: 0 56px 16px;
+.chat-input-panel {
   display: flex;
   flex-direction: column;
   align-items: center;
+  gap: 6px;
+  padding: 6px 20px 12px;
 
-  .input-wrapper {
-    width: 100%;
-    max-width: 800px;
-    position: relative;
-    background: #f8f9fa;
-    border: 1px solid #d9dcdf;
-    border-radius: 16px;
-    padding: 12px 12px 52px 12px;
+  .input-card {
+    width: min(1100px, 83.3333%);
+    background: #fff;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 10px 12px 8px;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    box-shadow: 0 2px 8px rgba(16, 24, 40, 0.04);
+
+    &:hover {
+      border-color: var(--el-color-primary-light-5);
+    }
 
     &:focus-within {
       border-color: var(--el-color-primary);
+      box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.12), 0 2px 8px rgba(16, 24, 40, 0.04);
     }
 
-    .datasource-bar {
-      display: flex;
-      align-items: center;
-      line-height: 22px;
-      font-size: 13px;
-      font-weight: 400;
-      color: #646a73;
-      margin-bottom: 8px;
-      min-height: 22px;
-
-      .label {
-        color: #646a73;
-      }
-
-      .ds-icon {
-        margin-right: 4px;
-        color: var(--el-color-primary);
-      }
-
-      .name {
-        color: #1f2329;
-        font-weight: 500;
-        max-width: 240px;
-      }
-
-      .ds-select {
-        width: 220px;
-
-        :deep(.el-input__wrapper) {
-          background: transparent;
-          box-shadow: none !important;
-          padding-left: 0;
-        }
-      }
+    &.disabled {
+      background: #fafbfc;
     }
 
     .input-area {
@@ -163,26 +114,76 @@ const focus = () => inputRef.value?.focus?.()
         background: transparent;
         border: none;
         box-shadow: none !important;
-        padding: 0;
+        padding: 0 4px;
         font-size: 14px;
         line-height: 22px;
         color: #1f2329;
         resize: none;
+        min-height: 44px;
 
         &::placeholder {
-          color: #8f959e;
+          color: #98a2b3;
         }
       }
     }
 
-    .input-icon {
-      position: absolute;
-      bottom: 12px;
-      right: 12px;
-      width: 32px;
-      height: 32px;
-      min-width: unset;
+    .input-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 6px;
+
+      .left {
+        .hint {
+          font-size: 11.5px;
+          color: #98a2b3;
+        }
+      }
+
+      .right {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .send-btn {
+        width: 34px;
+        height: 34px;
+        border-radius: 8px;
+        border: none;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: #f0f3f8;
+        color: #98a2b3;
+        transition: all 0.15s ease;
+
+        &.enabled {
+          background: var(--el-color-primary);
+          color: #fff;
+          box-shadow: 0 4px 10px rgba(22, 119, 255, 0.32);
+
+          &:hover {
+            background: var(--el-color-primary-dark-2);
+          }
+        }
+
+        &.loading {
+          background: var(--el-color-primary);
+          color: #fff;
+        }
+
+        &:disabled {
+          cursor: not-allowed;
+        }
+      }
     }
+  }
+
+  .footer-tip {
+    font-size: 11px;
+    color: #98a2b3;
   }
 }
 </style>

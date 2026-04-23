@@ -1,32 +1,31 @@
 """Chat API routes based on SQLBot patterns."""
 
-from fastapi import APIRouter, Depends, HTTPException
+import asyncio
+import json
+import logging
+import time
+from typing import AsyncGenerator, Optional
+
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from typing import List, AsyncGenerator, Optional
-import logging
-import json
-import asyncio
-import time
-from datetime import datetime
 
-from common.core.database import get_session
-from common.exceptions.base import NotFoundException, BadRequestException, UnauthorizedException
-from common.schemas.response import success_response, ResponseModel
+from chat.crud import chat as chat_crud
 from chat.schemas import (
     ChatRequest,
-    SQLValidationRequest,
-    SQLFormatRequest,
     ConversationCreate,
-    ConversationUpdate,
-    ConversationResponse,
-    ConversationListResponse,
-    ConversationRecordResponse,
     ConversationDetailResponse,
-    ChatResponse,
+    ConversationRecordResponse,
+    ConversationResponse,
+    ConversationUpdate,
+    SQLFormatRequest,
+    SQLValidationRequest,
 )
 from chat.service.sql_generator import SQLGenerator
-from chat.crud import chat as chat_crud
+from common.core.database import get_session
+from common.core.trace import new_trace_id, set_trace_id
+from common.exceptions.base import NotFoundException
+from common.schemas.response import success_response
 
 logger = logging.getLogger(__name__)
 
@@ -94,14 +93,17 @@ def get_conversation(
         user_id=current_user_id
     )
 
+    def _parse_json(value, default):
+        if value in (None, ""):
+            return default
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return default
+
     # Parse JSON fields
     record_responses = []
-    import json
     for record in records:
-        try:
-            steps = json.loads(record.steps) if getattr(record, "steps", None) else []
-        except (TypeError, ValueError):
-            steps = []
         record_dict = {
             "id": record.id,
             "conversation_id": record.conversation_id,
@@ -110,14 +112,20 @@ def get_conversation(
             "sql": record.sql,
             "sql_answer": record.sql_answer,
             "sql_error": record.sql_error,
-            "exec_result": json.loads(record.exec_result) if record.exec_result else None,
+            "exec_result": _parse_json(record.exec_result, None),
             "chart_type": record.chart_type,
-            "chart_config": json.loads(record.chart_config) if record.chart_config else None,
+            "chart_config": _parse_json(record.chart_config, None),
             "is_success": record.is_success,
             "finish_time": record.finish_time,
             "create_time": record.create_time,
             "reasoning": getattr(record, "reasoning", "") or "",
-            "steps": steps,
+            "steps": _parse_json(getattr(record, "steps", None), []),
+            "agent_mode": getattr(record, "agent_mode", None),
+            "plans": _parse_json(getattr(record, "plans", None), None),
+            "sub_task_agents": _parse_json(getattr(record, "sub_task_agents", None), None),
+            "plan_states": _parse_json(getattr(record, "plan_states", None), None),
+            "tool_calls": _parse_json(getattr(record, "tool_calls", None), None),
+            "summary": getattr(record, "summary", None),
         }
         record_responses.append(ConversationRecordResponse(**record_dict))
 
@@ -246,10 +254,10 @@ def execute_sql(
     2. Executes the SQL on the target database
     3. Returns the results
     """
+
+    from common.utils.aes import decrypt_conf
     from datasource.crud import crud_datasource
     from datasource.db.db import execute_sql as db_execute_sql
-    from common.utils.aes import decrypt_conf
-    import json
 
     # Get datasource
     datasource = crud_datasource.get_datasource_by_id(session, request.datasource_id)
@@ -283,6 +291,7 @@ def execute_sql(
             is_success=False,
             reasoning=reasoning,
             steps=steps,
+            agent_mode="legacy",
         )
         return success_response(
             data={
@@ -326,6 +335,7 @@ def execute_sql(
         is_success=success,
         reasoning=reasoning,
         steps=steps,
+        agent_mode="legacy",
     )
 
     if not success:
@@ -370,6 +380,12 @@ def _persist_record(
     is_success: bool,
     reasoning: str,
     steps,
+    agent_mode: Optional[str] = None,
+    plans: Optional[list[str]] = None,
+    sub_task_agents: Optional[list[str]] = None,
+    plan_states: Optional[list[dict]] = None,
+    tool_calls: Optional[list[dict]] = None,
+    summary: Optional[str] = None,
 ) -> int:
     """Persist a conversation record. Returns record_id (0 if no conversation)."""
     if not request.conversation_id:
@@ -387,6 +403,12 @@ def _persist_record(
             is_success=is_success,
             reasoning=reasoning or None,
             steps=steps or None,
+            agent_mode=agent_mode,
+            plans=plans,
+            sub_task_agents=sub_task_agents,
+            plan_states=plan_states,
+            tool_calls=tool_calls,
+            summary=summary,
         )
         return record.id or 0
     except Exception as e:
@@ -404,22 +426,39 @@ async def chat_stream(
     """
     Chat endpoint with Server-Sent Events (SSE) streaming output.
 
-    Event order:
-      step      → one for each pipeline step as it completes
-      reasoning → LLM natural-language reasoning text (when extracted)
-      sql       → generated SQL + chart_type
-      result    → execution result {columns, rows, row_count}
-      error     → terminal failure
-      done      → terminates the stream, payload {record_id}
+    Backends (switched by ``request.agent_mode``):
+      - "agent"  (default): ReAct DataAnalystAgent with tools
+      - "team"            : DataAnalyst → Charter → Summarizer 线性 DAG
+      - "legacy"          : single-shot SQLGenerator pipeline
 
-    Note: we intentionally do NOT use Depends(get_session) here — the pipeline
-    runs in a worker thread and SQLAlchemy sessions must not be shared across
-    threads. Instead the worker opens its own session via get_db_session().
+    Event vocabulary (agent/team add the ``*`` rows, legacy uses the rest):
+      step           → pipeline / ReAct step status
+      reasoning      → LLM natural-language reasoning (legacy only)
+      sql            → final SQL + chart_type (both modes)
+      result         → execution result {columns, rows, row_count} (both modes)
+      agent_thought* → each ReAct round's raw LLM output
+      tool_call*     → before a tool runs
+      tool_result*   → after a tool runs (success / failure both)
+      final_answer*  → terminate tool emitted
+      agent_speak†   → (team only) 下游 Agent 开始/结束的广播
+      chart†         → (team only) Charter 推荐的 chart_type + chart_config
+      summary†       → (team only) Summarizer 生成的最终中文结论
+      error          → terminal failure
+      done           → terminates the stream, payload {record_id}
+
+    Response header ``X-Trace-Id`` 带有本次请求的 trace_id；同一 trace_id 会
+    出现在后端所有日志里（``[<trace_id>]`` 前缀），便于前端与后端对齐排查。
     """
-    from src.datasource.crud import crud_datasource
-    from src.datasource.db.db import execute_sql as db_execute_sql
-    from src.common.utils.aes import decrypt_conf
-    from src.common.core.database import get_db_session
+    trace_id = new_trace_id()
+    set_trace_id(trace_id)
+    logger.info(
+        "chat_stream start mode=%s ds=%s conv=%s user=%s q_len=%d",
+        request.agent_mode,
+        request.datasource_id,
+        request.conversation_id,
+        current_user_id,
+        len(request.question or ""),
+    )
 
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
@@ -428,7 +467,43 @@ async def chat_stream(
     def push(event: str, data: dict) -> None:
         loop.call_soon_threadsafe(queue.put_nowait, (event, data))
 
-    def run_pipeline() -> None:
+    async def emit_async(event: str, data: dict) -> None:
+        queue.put_nowait((event, data))
+
+    async def run_agent_branch(team: bool) -> None:
+        """单 Agent 或 team 模式的 SSE 执行入口。
+
+        ``team=True`` 时调 :func:`run_team_stream`，跑 DataAnalyst → Charter →
+        Summarizer；否则走单 Agent 路径。两者对外的 SSE 事件集是 team 超集
+        agent，前端可以只订阅 agent 的那套也能跑。
+        """
+        record_id = 0
+        try:
+            from src.chat.service.agent_runner import (
+                run_agent_stream,
+                run_team_stream,
+            )
+
+            runner = run_team_stream if team else run_agent_stream
+            record_id = await runner(
+                request=request,
+                current_user_id=current_user_id,
+                emit=emit_async,
+                enable_tool_agent=request.enable_tool_agent,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Agent chat stream error: {e}")
+            await emit_async("error", {"error": str(e)})
+        finally:
+            await emit_async("done", {"record_id": record_id})
+            queue.put_nowait(SENTINEL)
+
+    def run_legacy_pipeline() -> None:
+        from src.common.core.database import get_db_session
+        from src.common.utils.aes import decrypt_conf
+        from src.datasource.crud import crud_datasource
+        from src.datasource.db.db import execute_sql as db_execute_sql
+
         steps_acc = []
         reasoning_text = ""
         record_id = 0
@@ -470,6 +545,7 @@ async def chat_stream(
                         is_success=False,
                         reasoning=reasoning_text,
                         steps=steps_acc,
+                        agent_mode="legacy",
                     )
                     push("error", {"error": result["error"]})
                     return
@@ -520,6 +596,7 @@ async def chat_stream(
                     is_success=success,
                     reasoning=reasoning_text,
                     steps=steps_acc,
+                    agent_mode="legacy",
                 )
 
                 if not success:
@@ -534,7 +611,10 @@ async def chat_stream(
             push("done", {"record_id": record_id})
             loop.call_soon_threadsafe(queue.put_nowait, SENTINEL)
 
-    asyncio.create_task(asyncio.to_thread(run_pipeline))
+    if request.agent_mode == "legacy":
+        asyncio.create_task(asyncio.to_thread(run_legacy_pipeline))
+    else:
+        asyncio.create_task(run_agent_branch(team=request.agent_mode == "team"))
 
     async def event_stream() -> AsyncGenerator[str, None]:
         while True:
@@ -551,13 +631,19 @@ async def chat_stream(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
+            "X-Trace-Id": trace_id,
         }
     )
 
 
 def _sse_event(event: str, data: dict) -> str:
-    """Format data as SSE event."""
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    """Format data as SSE event.
+
+    ``default=str`` is a safety net for exotic DB types (Decimal / datetime /
+    UUID) that can appear in ``tool_result.data`` or ``result`` rows — a single
+    un-serializable value would otherwise tear down the whole SSE connection.
+    """
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
 
 @router.post("/validate-sql")

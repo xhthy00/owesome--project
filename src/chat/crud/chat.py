@@ -113,6 +113,12 @@ def create_conversation_record(
     is_success: bool = True,
     reasoning: Optional[str] = None,
     steps: Optional[List[Any]] = None,
+    agent_mode: Optional[str] = None,
+    plans: Optional[List[str]] = None,
+    sub_task_agents: Optional[List[str]] = None,
+    plan_states: Optional[List[Any]] = None,
+    tool_calls: Optional[List[Any]] = None,
+    summary: Optional[str] = None,
 ) -> ConversationRecord:
     """Create a new conversation record."""
     exec_result_str = None
@@ -129,6 +135,18 @@ def create_conversation_record(
     steps_str = None
     if steps:
         steps_str = json.dumps(steps, ensure_ascii=False)
+    plans_str = json.dumps(plans, ensure_ascii=False) if plans is not None else None
+    sub_task_agents_str = (
+        json.dumps(sub_task_agents, ensure_ascii=False)
+        if sub_task_agents is not None
+        else None
+    )
+    plan_states_str = (
+        json.dumps(plan_states, ensure_ascii=False) if plan_states is not None else None
+    )
+    tool_calls_str = (
+        json.dumps(tool_calls, ensure_ascii=False) if tool_calls is not None else None
+    )
 
     record = ConversationRecord(
         conversation_id=conversation_id,
@@ -145,6 +163,12 @@ def create_conversation_record(
         create_time=datetime.now(),
         reasoning=reasoning,
         steps=steps_str,
+        agent_mode=agent_mode,
+        plans=plans_str,
+        sub_task_agents=sub_task_agents_str,
+        plan_states=plan_states_str,
+        tool_calls=tool_calls_str,
+        summary=summary,
     )
     session.add(record)
 

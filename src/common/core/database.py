@@ -3,9 +3,9 @@
 from contextlib import contextmanager
 from typing import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from sqlmodel import SQLModel, Session
+from sqlmodel import Session, SQLModel
 
 from src.common.core.config import get_settings
 
@@ -38,17 +38,25 @@ def _ensure_columns() -> None:
     minimal idempotent ALTER (Postgres / SQLite compatible) so dev databases
     don't need a manual migration when new columns are added.
     """
-    from sqlalchemy import inspect, text
+    from sqlalchemy import inspect
 
     additions = {
         "chat_conversation_record": {
             "reasoning": "TEXT",
             "steps": "TEXT",
+            "agent_mode": "TEXT",
+            "plans": "TEXT",
+            "sub_task_agents": "TEXT",
+            "plan_states": "TEXT",
+            "tool_calls": "TEXT",
+            "summary": "TEXT",
         },
     }
 
     inspector = inspect(engine)
     with engine.begin() as conn:
+        dialect = engine.dialect.name
+        _ensure_tool_call_log_table(conn, dialect)
         for table, cols in additions.items():
             if not inspector.has_table(table):
                 continue
@@ -57,6 +65,52 @@ def _ensure_columns() -> None:
                 if col in existing:
                     continue
                 conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {col} {col_type}'))
+
+
+def _ensure_tool_call_log_table(conn, dialect: str) -> None:
+    if dialect == "postgresql":
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS tool_call_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    trace_id TEXT NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    round_idx INTEGER NULL,
+                    sub_task_index INTEGER NULL,
+                    tool_name TEXT NOT NULL,
+                    success BOOLEAN NOT NULL,
+                    elapsed_ms INTEGER NULL,
+                    args_json TEXT NOT NULL,
+                    result_preview TEXT NOT NULL,
+                    created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL
+                )
+                """
+            )
+        )
+    else:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS tool_call_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trace_id TEXT NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    round_idx INTEGER NULL,
+                    sub_task_index INTEGER NULL,
+                    tool_name TEXT NOT NULL,
+                    success BOOLEAN NOT NULL,
+                    elapsed_ms INTEGER NULL,
+                    args_json TEXT NOT NULL,
+                    result_preview TEXT NOT NULL,
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_tool_call_log_trace_id ON tool_call_log(trace_id)"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_tool_call_log_created_at ON tool_call_log(created_at)"))
 
 
 def get_session() -> Generator[Session, None, None]:

@@ -1,5 +1,15 @@
 import { request } from '@/utils/request'
-import { Chat, ChatInfo, ChatRecord, type ReasoningStep } from '@/views/chat/typed'
+import {
+  Chat,
+  ChatInfo,
+  ChatRecord,
+  type AgentMode,
+  type AgentSpeak,
+  type ChartConfig,
+  type PlanState,
+  type ReasoningStep,
+  type ToolCallRecord,
+} from '@/views/chat/typed'
 import { streamSSE } from '@/utils/sse'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
@@ -69,9 +79,22 @@ export const chatApi = {
   /**
    * Send a question via SSE so the UI can render thinking steps in real-time.
    * The provided callbacks are invoked as events arrive from the backend.
+   *
+   * 事件契约（与后端 `/chat/chat-stream` 对齐）：
+   * - 兼容层（agent/team/legacy 通用）：step / reasoning / sql / result / error / done
+   * - Agent 模式扩展：tool_call / tool_result / agent_thought / final_answer
+   * - Team 模式扩展：plan / plan_update / agent_speak / chart / summary
+   *
+   * 客户端按"存在即调用"处理——若后端未发某事件，对应 handler 不会触发。
    */
   executeStream: (
-    payload: { question: string; datasource_id: number; conversation_id?: number },
+    payload: {
+      question: string
+      datasource_id: number
+      conversation_id?: number
+      agent_mode?: AgentMode
+      enable_tool_agent?: boolean
+    },
     handlers: {
       onStep?: (step: ReasoningStep) => void
       onReasoning?: (text: string) => void
@@ -79,6 +102,22 @@ export const chatApi = {
       onResult?: (result: { columns: string[]; rows: any[][]; row_count: number }) => void
       onError?: (msg: string) => void
       onDone?: (recordId: number) => void
+      // Agent / Team 共享：DataAnalyst ReAct 循环
+      onToolCall?: (payload: ToolCallRecord & { agent?: string }) => void
+      onToolResult?: (payload: ToolCallRecord & { agent?: string }) => void
+      onAgentThought?: (payload: {
+        agent?: string
+        round?: number
+        thought?: string
+        sub_task_index?: number
+      }) => void
+      onFinalAnswer?: (payload: { agent?: string; content?: string; sub_task_index?: number }) => void
+      // Team 模式
+      onPlan?: (payload: { plans: string[]; sub_task_agents?: string[] }) => void
+      onPlanUpdate?: (state: PlanState) => void
+      onAgentSpeak?: (speak: AgentSpeak) => void
+      onChart?: (payload: { chart_type: string; chart_config?: ChartConfig }) => void
+      onSummary?: (content: string) => void
     },
     signal?: AbortSignal
   ): Promise<void> => {
@@ -87,24 +126,61 @@ export const chatApi = {
       body: payload,
       signal,
       onEvent: (evt) => {
+        const data = evt.data || {}
         switch (evt.event) {
+          // --------------------- 兼容层 ---------------------
           case 'step':
-            handlers.onStep?.(evt.data as ReasoningStep)
+            handlers.onStep?.(data as ReasoningStep)
             break
           case 'reasoning':
-            handlers.onReasoning?.(evt.data?.text || '')
+            handlers.onReasoning?.(data?.text || '')
             break
           case 'sql':
-            handlers.onSql?.(evt.data?.sql || '', evt.data?.chart_type || 'table')
+            handlers.onSql?.(data?.sql || '', data?.chart_type || 'table')
             break
           case 'result':
-            handlers.onResult?.(evt.data)
+            handlers.onResult?.(data)
             break
           case 'error':
-            handlers.onError?.(evt.data?.error || 'Unknown error')
+            handlers.onError?.(data?.error || 'Unknown error')
             break
           case 'done':
-            handlers.onDone?.(evt.data?.record_id || 0)
+            handlers.onDone?.(data?.record_id || 0)
+            break
+          // --------------------- Agent / Team ---------------------
+          case 'tool_call':
+            handlers.onToolCall?.(data)
+            break
+          case 'tool_result':
+            handlers.onToolResult?.(data)
+            break
+          case 'agent_thought':
+            handlers.onAgentThought?.(data)
+            break
+          case 'final_answer':
+            handlers.onFinalAnswer?.(data)
+            break
+          // --------------------- Team 专属 ---------------------
+          case 'plan':
+            handlers.onPlan?.({
+              plans: Array.isArray(data?.plans) ? data.plans : [],
+              sub_task_agents: Array.isArray(data?.sub_task_agents) ? data.sub_task_agents : undefined,
+            })
+            break
+          case 'plan_update':
+            handlers.onPlanUpdate?.(data as PlanState)
+            break
+          case 'agent_speak':
+            handlers.onAgentSpeak?.(data as AgentSpeak)
+            break
+          case 'chart':
+            handlers.onChart?.({
+              chart_type: data?.chart_type || 'table',
+              chart_config: data?.chart_config,
+            })
+            break
+          case 'summary':
+            handlers.onSummary?.(data?.content || '')
             break
         }
       },

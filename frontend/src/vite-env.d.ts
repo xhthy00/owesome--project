@@ -7,6 +7,12 @@ declare module '*.vue' {
   export default component
 }
 
+declare module 'markdown-it-link-attributes' {
+  import type { PluginWithOptions } from 'markdown-it'
+  const plugin: PluginWithOptions<any>
+  export default plugin
+}
+
 declare module 'web-storage-cache' {
   interface CacheOptions {
     storage?: 'localStorage' | 'sessionStorage'

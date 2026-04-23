@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { getChartInstance } from '@/views/chat/component/index'
-import type { BaseChart, ChartTypes } from '@/views/chat/component/BaseChart'
+import type { BaseChart, ChartAxis, ChartTypes } from '@/views/chat/component/BaseChart'
 import { inferAxes } from '@/views/chat/component/charts/utils'
 
 const props = withDefaults(
@@ -11,6 +11,12 @@ const props = withDefaults(
     columns: string[]
     rows: any[][]
     showLabel?: boolean
+    /**
+     * 可选：后端 Charter 推荐的图表轴配置。传了就**优先**用它，
+     * 没传或转换结果为空再 fall back 到启发式 inferAxes。
+     * 原始契约：`{x: string, y: string[], title?: string}`
+     */
+    axesOverride?: ChartAxis[]
   }>(),
   { showLabel: false }
 )
@@ -23,7 +29,13 @@ function render() {
   destroy()
   if (!props.columns?.length || !props.rows?.length) return
 
-  const { axes, data } = inferAxes(props.columns, props.rows, props.type)
+  // 先用后端 axes（若传且 columns 里都存在），否则前端启发式推断。
+  const override = (props.axesOverride || []).filter((a) =>
+    a && a.value && props.columns.includes(a.value)
+  )
+  const { axes: inferred, data } = inferAxes(props.columns, props.rows, props.type)
+  const axes = override.length > 0 ? override : inferred
+
   instance = getChartInstance(props.type, chartId.value)
   if (!instance) return
   instance.showLabel = props.showLabel
@@ -41,7 +53,7 @@ function destroy() {
 }
 
 watch(
-  () => [props.type, props.columns, props.rows, props.showLabel],
+  () => [props.type, props.columns, props.rows, props.showLabel, props.axesOverride],
   () => nextTick(render),
   { deep: true }
 )

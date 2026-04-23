@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue'
 import {
   ChatDotRound,
+  User,
   Loading,
   ArrowDown,
   CircleCheckFilled,
@@ -13,20 +14,39 @@ import {
   DataAnalysis,
   View,
   Hide,
+  Tools,
+  Reading,
+  CopyDocument,
+  Refresh,
+  Search,
+  Document,
+  EditPen,
+  Monitor,
+  QuestionFilled,
+  Connection,
 } from '@element-plus/icons-vue'
-import type { ChatMessage } from './typed'
-import type { ChartTypes } from './component/BaseChart'
+import { ElMessage } from 'element-plus'
+import type { ChatMessage, ChartConfig, ChatRecord, ToolCallRecord } from './typed'
+import type { ChartAxis, ChartTypes } from './component/BaseChart'
 import ChartComponent from './component/ChartComponent.vue'
+import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 import { datetimeFormat } from '@/utils/utils'
 
 const props = defineProps<{ messages: ChatMessage[] }>()
+const emit = defineEmits<{
+  retry: [question: string]
+}>()
 
 const PAGE_SIZE = 20
 
 const pageMap = ref<Record<number, number>>({})
 const expandThinking = ref<Record<number, boolean>>({})
+const expandPlans = ref<Record<number, boolean>>({})
+const expandTools = ref<Record<number, boolean>>({})
+const expandToolCalls = ref<Record<string, boolean>>({})
 const chartTypeMap = ref<Record<number, ChartTypes>>({})
 const showLabelMap = ref<Record<number, boolean>>({})
+const resultPanelTabMap = ref<Record<number, 'chart' | 'sql' | 'data'>>({})
 
 const CHART_OPTIONS: { value: ChartTypes; label: string; icon: any }[] = [
   { value: 'table', label: 'chat.chart_type.table', icon: Grid },
@@ -47,8 +67,17 @@ const toggleShowLabel = (i: number) => (showLabelMap.value[i] = !showLabelMap.va
 
 const getPage = (i: number) => pageMap.value[i] || 1
 const setPage = (i: number, p: number) => (pageMap.value[i] = p)
+const getResultPanelTab = (i: number, msg: ChatMessage): 'chart' | 'sql' | 'data' => {
+  if (resultPanelTabMap.value[i]) return resultPanelTabMap.value[i]
+  const hasChart = getChartType(i, msg.record?.chart_type) !== 'table' && !!msg.record?.exec_result
+  const hasData = !!msg.record?.exec_result
+  resultPanelTabMap.value[i] = hasChart ? 'chart' : hasData ? 'data' : 'sql'
+  return resultPanelTabMap.value[i]
+}
+const setResultPanelTab = (i: number, tab: 'chart' | 'sql' | 'data') => {
+  resultPanelTabMap.value[i] = tab
+}
 
-// pending 时默认展开（让用户看到流式过程），完成后默认收起
 const isThinkingExpanded = (i: number, pending = false): boolean => {
   if (i in expandThinking.value) return expandThinking.value[i]
   return pending
@@ -65,6 +94,172 @@ const formatElapsed = (ms: number) =>
 const hasThinking = (msg: any) =>
   !!(msg.record && ((msg.record.steps && msg.record.steps.length) || msg.record.reasoning))
 
+const hasPlans = (msg: any): boolean => {
+  const r: ChatRecord | undefined = msg.record
+  return !!(r && r.plans && r.plans.length > 0)
+}
+
+const hasToolCalls = (msg: any): boolean => {
+  const r: ChatRecord | undefined = msg.record
+  return !!(r && r.tool_calls && r.tool_calls.length > 0)
+}
+
+const hasSummary = (msg: any): boolean => !!msg?.record?.summary
+const hasSqlAnswer = (msg: any): boolean => !!msg?.record?.sql_answer
+
+const isPlanExpanded = (i: number, pending = false): boolean => {
+  if (i in expandPlans.value) return expandPlans.value[i]
+  return pending
+}
+const togglePlan = (i: number, pending = false) =>
+  (expandPlans.value[i] = !isPlanExpanded(i, pending))
+
+const isToolsExpanded = (i: number, pending = false): boolean => {
+  if (i in expandTools.value) return !!expandTools.value[i]
+  return pending
+}
+const toggleTools = (i: number, pending = false) =>
+  (expandTools.value[i] = !isToolsExpanded(i, pending))
+
+const groupedToolCalls = (calls: ToolCallRecord[] | undefined) => {
+  if (!calls || !calls.length) return []
+  const groups = new Map<number | '__none__', ToolCallRecord[]>()
+  for (const c of calls) {
+    const k: number | '__none__' =
+      typeof c.sub_task_index === 'number' ? c.sub_task_index : '__none__'
+    const list = groups.get(k) || []
+    list.push(c)
+    groups.set(k, list)
+  }
+  return Array.from(groups.entries()).map(([k, list]) => ({
+    sub_task_index: k === '__none__' ? undefined : k,
+    items: list.sort((a, b) => a.round - b.round),
+  }))
+}
+
+const chartConfigToAxes = (cfg: ChartConfig | undefined): ChartAxis[] | undefined => {
+  if (!cfg) return undefined
+  const axes: ChartAxis[] = []
+  if (cfg.x) axes.push({ name: cfg.x, value: cfg.x, type: 'x' })
+  const ys = Array.isArray(cfg.y) ? cfg.y.filter(Boolean) : []
+  ys.forEach((y) =>
+    axes.push({ name: y, value: y, type: 'y', 'multi-quota': ys.length > 1 })
+  )
+  return axes.length ? axes : undefined
+}
+
+const planStateIcon = (state: string) => {
+  if (state === 'ok') return CircleCheckFilled
+  if (state === 'error') return CircleCloseFilled
+  return Loading
+}
+
+const planAgentLabel = (agent?: string): string => {
+  if (agent === 'ToolExpert') return 'ToolExpert'
+  if (agent === 'DataAnalyst') return 'DataAnalyst'
+  return ''
+}
+
+const truncate = (s: string | undefined, n: number): string => {
+  if (!s) return ''
+  return s.length <= n ? s : s.slice(0, n) + '…'
+}
+
+const formatArgs = (args: Record<string, any> | undefined): string => {
+  if (!args || typeof args !== 'object' || !Object.keys(args).length) return ''
+  try {
+    const s = JSON.stringify(args)
+    return truncate(s, 200)
+  } catch {
+    return ''
+  }
+}
+
+const formatToolName = (tool: string): string =>
+  tool
+    .split(/[_\-\s]+/)
+    .filter(Boolean)
+    .map((w) => w[0].toUpperCase() + w.slice(1))
+    .join(' ')
+
+const toolCardKey = (msgIndex: number, groupIndex: number, callIndex: number): string =>
+  `${msgIndex}-${groupIndex}-${callIndex}`
+
+const isToolCardExpanded = (
+  msgIndex: number,
+  groupIndex: number,
+  callIndex: number,
+  c: ToolCallRecord,
+  pending?: boolean
+): boolean => {
+  const key = toolCardKey(msgIndex, groupIndex, callIndex)
+  if (key in expandToolCalls.value) return !!expandToolCalls.value[key]
+  return toolStatus(c, pending) !== 'ok'
+}
+
+const toggleToolCard = (
+  msgIndex: number,
+  groupIndex: number,
+  callIndex: number,
+  c: ToolCallRecord,
+  pending?: boolean
+) => {
+  const key = toolCardKey(msgIndex, groupIndex, callIndex)
+  expandToolCalls.value[key] = !isToolCardExpanded(msgIndex, groupIndex, callIndex, c, pending)
+}
+
+const toolStatus = (c: ToolCallRecord, pending?: boolean): 'running' | 'error' | 'ok' => {
+  if (c.success === false) return 'error'
+  if (c.success === true) return 'ok'
+  if (pending) return 'running'
+  // 历史消息如果有耗时、输出或数据，默认视为已完成，避免全部显示 Running。
+  if ((c.elapsed_ms || 0) > 0 || !!c.content || c.data != null) return 'ok'
+  return 'running'
+}
+
+const toolStatusText = (c: ToolCallRecord, pending?: boolean): string => {
+  const s = toolStatus(c, pending)
+  if (s === 'error') return 'Error'
+  if (s === 'ok') return 'Done'
+  return 'Running'
+}
+
+const toolStatusClass = (c: ToolCallRecord, pending?: boolean): string => {
+  const s = toolStatus(c, pending)
+  if (s === 'error') return 'error'
+  if (s === 'ok') return 'ok'
+  return 'running'
+}
+
+const toolIconFor = (tool: string): any => {
+  const t = (tool || '').toLowerCase()
+  if (t.includes('read') || t.includes('file') || t.includes('write')) return Document
+  if (t.includes('search') || t.includes('grep') || t.includes('glob')) return Search
+  if (t.includes('edit') || t.includes('patch')) return EditPen
+  if (t.includes('bash') || t.includes('shell') || t.includes('command')) return Monitor
+  if (t.includes('task') || t.includes('delegate')) return Connection
+  if (t.includes('question') || t.includes('ask')) return QuestionFilled
+  return Tools
+}
+
+const toolSubtitle = (c: ToolCallRecord): string => {
+  const args = c.args || {}
+  const preferred = ['file_path', 'path', 'query', 'pattern', 'command', 'sql', 'url']
+  for (const k of preferred) {
+    const v = args[k]
+    if (typeof v === 'string' && v.trim()) return truncate(v.trim(), 64)
+  }
+  const keys = Object.keys(args)
+  if (!keys.length) return ''
+  return truncate(
+    keys
+      .slice(0, 2)
+      .map((k) => `${k}: ${String(args[k])}`)
+      .join(' · '),
+    64
+  )
+}
+
 const slicedRows = (i: number, rows: any[][] | undefined) => {
   if (!rows) return []
   const p = getPage(i)
@@ -72,242 +267,415 @@ const slicedRows = (i: number, rows: any[][] | undefined) => {
   return rows.slice(start, start + PAGE_SIZE)
 }
 
-// 占位消息(pending)滚动时显示动态思考点
 const dotInterval = ref(0)
 setInterval(() => (dotInterval.value = (dotInterval.value + 1) % 4), 500)
 const dots = computed(() => '.'.repeat(dotInterval.value))
+
+const onCopy = async (msg: ChatMessage) => {
+  const text =
+    msg.record?.summary ||
+    msg.record?.sql_answer ||
+    msg.record?.sql ||
+    msg.question ||
+    ''
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制')
+  } catch {
+    ElMessage.error('复制失败')
+  }
+}
+
+const canRetry = (i: number, msg: ChatMessage): boolean => {
+  if (msg.pending || msg.role !== 'assistant') return false
+  return !!props.messages[i - 1]?.question
+}
+
+const onRetry = (i: number) => {
+  const q = props.messages[i - 1]?.question
+  if (!q) return
+  emit('retry', q)
+}
+
 void props
 </script>
 
 <template>
   <div class="chat-record">
     <template v-for="(msg, i) in messages" :key="i">
-      <!-- 用户消息：右对齐气泡 + 时间戳 -->
-      <div v-if="msg.role === 'user'" class="row user-row">
-        <div class="user-bubble">{{ msg.question }}</div>
-        <div class="meta">{{ datetimeFormat(msg.create_time) }}</div>
+      <!-- 用户消息 -->
+      <div v-if="msg.role === 'user'" class="turn user-turn">
+        <div class="turn-body">
+          <div class="bubble">{{ msg.question }}</div>
+          <div class="meta">{{ datetimeFormat(msg.create_time) }}</div>
+        </div>
+        <div class="avatar user-avatar">
+          <el-icon :size="16"><User /></el-icon>
+        </div>
       </div>
 
-      <!-- AI 消息：左对齐 logo + 内容 -->
-      <div v-else class="row assistant-row">
-        <div class="avatar">
+      <!-- 助手消息 -->
+      <div v-else class="turn assistant-turn">
+        <div class="avatar ai-avatar">
           <el-icon :size="16"><ChatDotRound /></el-icon>
         </div>
-        <div class="assistant-body">
-            <!-- 思考过程：pending 时如已有 steps 流入则实时展示，否则显示思考中动画 -->
-              <template v-if="msg.pending">
-                <div
-                  v-if="hasThinking(msg)"
-                  class="thinking-card streaming"
-                >
-                  <div class="thinking-header" @click="toggleThinking(i, true)">
-                    <el-icon
-                      class="caret"
-                      :class="{ open: isThinkingExpanded(i, true) }"
-                      :size="12"
-                    >
+        <div class="turn-body">
+          <div class="agent-name">
+            <span>智能问数助手</span>
+            <span v-if="msg.record?.agent_mode" class="mode-tag">
+              {{ msg.record.agent_mode === 'team' ? '团队协作' : '单体分析' }}
+            </span>
+          </div>
+
+          <div class="assistant-card">
+            <div class="assistant-split" :class="{ 'stacked-layout': !msg.pending }">
+              <section class="thinking-col">
+                <div class="panel-title">思考过程</div>
+                <div class="thinking-panel">
+                <div v-if="hasPlans(msg)" class="block plans-block">
+                  <div class="block-header" @click="togglePlan(i, msg.pending)">
+                    <el-icon class="caret" :class="{ open: isPlanExpanded(i, msg.pending) }" :size="12">
                       <ArrowDown />
                     </el-icon>
-                    <el-icon class="is-loading streaming-icon" :size="14">
-                      <Loading />
-                    </el-icon>
-                    <span class="title">{{ $t('chat.thinking_now') }}{{ dots }}</span>
-                    <span class="elapsed muted">
-                      {{ formatElapsed(totalElapsedMs(msg.record!.steps)) }}
+                    <el-icon class="block-icon plan" :size="14"><Reading /></el-icon>
+                    <span class="block-title">{{ $t('chat.plan') }}</span>
+                    <span class="badge plan-badge">
+                      {{ $t('chat.plan_steps', { n: msg.record!.plans!.length }) }}
                     </span>
                   </div>
-                  <div v-show="isThinkingExpanded(i, true)" class="thinking-body">
-                    <ol v-if="msg.record!.steps && msg.record!.steps.length" class="steps">
-                      <li v-for="(step, si) in msg.record!.steps" :key="si" class="step">
-                        <el-icon
-                          :size="14"
-                          :class="['step-icon', step.status === 'error' ? 'error' : 'ok']"
-                        >
-                          <CircleCloseFilled v-if="step.status === 'error'" />
-                          <CircleCheckFilled v-else />
-                        </el-icon>
-                        <span class="step-label">{{ step.label }}</span>
-                        <span v-if="step.detail" class="step-detail muted">
-                          {{ step.detail }}
-                        </span>
-                        <span class="step-elapsed muted">
-                          {{ formatElapsed(step.elapsed_ms || 0) }}
-                        </span>
-                      </li>
-                    </ol>
-                    <div v-if="msg.record!.reasoning" class="reasoning">
-                      <pre>{{ msg.record!.reasoning }}</pre>
-                    </div>
-                  </div>
-                </div>
-                <div v-else class="thinking-card pending">
-                  <el-icon class="is-loading icon"><Loading /></el-icon>
-                  <span class="title">{{ $t('chat.thinking_now') }}{{ dots }}</span>
-                </div>
-              </template>
-
-              <div v-else-if="hasThinking(msg)" class="thinking-card">
-                <div class="thinking-header" @click="toggleThinking(i)">
-                  <el-icon
-                    class="caret"
-                    :class="{ open: isThinkingExpanded(i) }"
-                    :size="12"
-                  >
-                    <ArrowDown />
-                  </el-icon>
-                  <span class="title">{{ $t('chat.thinking') }}</span>
-                  <span class="elapsed muted">
-                    {{ formatElapsed(totalElapsedMs(msg.record!.steps)) }}
-                  </span>
-                </div>
-                <div v-show="isThinkingExpanded(i)" class="thinking-body">
-                  <ol v-if="msg.record!.steps && msg.record!.steps.length" class="steps">
-                    <li v-for="(step, si) in msg.record!.steps" :key="si" class="step">
+                  <ol v-show="isPlanExpanded(i, msg.pending)" class="plan-body">
+                    <li
+                      v-for="(st, si) in msg.record!.plan_states || []"
+                      :key="si"
+                      class="plan-item"
+                      :class="{ error: st.state === 'error' }"
+                    >
                       <el-icon
                         :size="14"
-                        :class="['step-icon', step.status === 'error' ? 'error' : 'ok']"
+                        :class="['plan-icon', st.state]"
+                        :style="st.state === 'running' ? 'animation: spin 1s linear infinite' : ''"
                       >
-                        <CircleCloseFilled v-if="step.status === 'error'" />
-                        <CircleCheckFilled v-else />
+                        <component :is="planStateIcon(st.state)" />
                       </el-icon>
-                      <span class="step-label">{{ step.label }}</span>
-                      <span v-if="step.detail" class="step-detail muted">
-                        {{ step.detail }}
+                      <span class="plan-label">{{ st.sub_task || `#${st.index + 1}` }}</span>
+                      <span v-if="planAgentLabel(st.sub_task_agent)" class="plan-agent">
+                        {{ planAgentLabel(st.sub_task_agent) }}
                       </span>
-                      <span class="step-elapsed muted">
-                        {{ formatElapsed(step.elapsed_ms || 0) }}
+                      <span v-if="st.state === 'ok' && st.row_count != null" class="muted">
+                        {{ $t('chat.rows', { n: st.row_count }) }}
+                      </span>
+                      <span v-else-if="st.state === 'error' && st.error" class="error-text">
+                        {{ truncate(st.error, 60) }}
                       </span>
                     </li>
                   </ol>
-                  <div v-if="msg.record!.reasoning" class="reasoning">
-                    <pre>{{ msg.record!.reasoning }}</pre>
+                </div>
+
+                <template v-if="msg.pending">
+                  <div v-if="hasThinking(msg)" class="block thinking-block streaming">
+                    <div class="block-header" @click="toggleThinking(i, true)">
+                      <el-icon class="caret" :class="{ open: isThinkingExpanded(i, true) }" :size="12">
+                        <ArrowDown />
+                      </el-icon>
+                      <el-icon class="is-loading streaming-icon" :size="14"><Loading /></el-icon>
+                      <span class="block-title">{{ $t('chat.thinking_now') }}{{ dots }}</span>
+                      <span class="elapsed">{{ formatElapsed(totalElapsedMs(msg.record!.steps)) }}</span>
+                    </div>
+                    <div v-show="isThinkingExpanded(i, true)" class="thinking-body">
+                      <ol v-if="msg.record!.steps && msg.record!.steps.length" class="steps">
+                        <li v-for="(step, si) in msg.record!.steps" :key="si" class="step">
+                          <el-icon
+                            :size="14"
+                            :class="['step-icon', step.status === 'error' ? 'error' : 'ok']"
+                          >
+                            <CircleCloseFilled v-if="step.status === 'error'" />
+                            <CircleCheckFilled v-else />
+                          </el-icon>
+                          <span class="step-label">{{ step.label }}</span>
+                          <span v-if="step.detail" class="step-detail muted">{{ step.detail }}</span>
+                          <span class="step-elapsed muted">{{ formatElapsed(step.elapsed_ms || 0) }}</span>
+                        </li>
+                      </ol>
+                      <div v-if="msg.record!.reasoning" class="reasoning">
+                        <pre>{{ msg.record!.reasoning }}</pre>
+                      </div>
+                    </div>
+                  </div>
+                  <div v-else class="block thinking-block pending">
+                    <el-icon class="is-loading icon" :size="14"><Loading /></el-icon>
+                    <span class="block-title">{{ $t('chat.thinking_now') }}{{ dots }}</span>
+                  </div>
+                </template>
+
+                <div v-if="hasToolCalls(msg)" class="block tools-block">
+                  <div class="block-header" @click="toggleTools(i, !!msg.pending)">
+                    <el-icon class="caret" :class="{ open: isToolsExpanded(i, !!msg.pending) }" :size="12">
+                      <ArrowDown />
+                    </el-icon>
+                    <el-icon class="block-icon tool" :size="14"><Tools /></el-icon>
+                    <span class="block-title">{{ $t('chat.tool_calls') }}</span>
+                    <span class="badge">
+                      {{ $t('chat.tool_calls_count', { n: msg.record!.tool_calls!.length }) }}
+                    </span>
+                  </div>
+                  <div v-show="isToolsExpanded(i, !!msg.pending)" class="tools-body">
+                    <div
+                      v-for="(grp, gi) in groupedToolCalls(msg.record!.tool_calls)"
+                      :key="gi"
+                      class="tool-group"
+                    >
+                      <div v-if="grp.sub_task_index != null" class="tool-group-title">
+                        {{ $t('chat.sub_task_label', { n: grp.sub_task_index + 1 }) }}
+                        <span v-if="msg.record!.plans && msg.record!.plans[grp.sub_task_index]">
+                          · {{ truncate(msg.record!.plans[grp.sub_task_index], 40) }}
+                        </span>
+                      </div>
+                      <div v-for="(c, ci) in grp.items" :key="ci" class="tool-item">
+                        <div class="tool-trigger" @click="toggleToolCard(i, gi, ci, c, !!msg.pending)">
+                          <div class="tool-trigger-main">
+                            <el-icon class="tool-type-icon" :size="14">
+                              <component :is="toolIconFor(c.tool)" />
+                            </el-icon>
+                            <div class="tool-meta">
+                              <div class="tool-title-line">
+                                <span class="tool-name">{{ formatToolName(c.tool) }}</span>
+                                <span v-if="toolSubtitle(c)" class="tool-subtitle">{{ toolSubtitle(c) }}</span>
+                              </div>
+                              <div v-if="formatArgs(c.args)" class="tool-args muted">
+                                {{ formatArgs(c.args) }}
+                              </div>
+                            </div>
+                          </div>
+                          <div class="tool-trigger-action">
+                            <span class="tool-status" :class="toolStatusClass(c, !!msg.pending)">
+                              <span class="status-dot" />
+                              <span>{{ toolStatusText(c, !!msg.pending) }}</span>
+                            </span>
+                            <span v-if="c.elapsed_ms" class="tool-elapsed muted">
+                              {{ formatElapsed(c.elapsed_ms) }}
+                            </span>
+                            <el-icon
+                              class="caret small"
+                              :class="{ open: isToolCardExpanded(i, gi, ci, c, !!msg.pending) }"
+                              :size="11"
+                            >
+                              <ArrowDown />
+                            </el-icon>
+                          </div>
+                        </div>
+                        <div v-show="isToolCardExpanded(i, gi, ci, c, !!msg.pending)" class="tool-detail">
+                          <div v-if="c.thought" class="tool-thought">
+                            <span class="tag">{{ $t('chat.thought') }}</span> {{ truncate(c.thought, 200) }}
+                          </div>
+                          <div v-if="c.content" class="tool-content">
+                            <span class="tag">{{ $t('chat.observation') }}</span>
+                            <pre>{{ truncate(c.content, 320) }}</pre>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
-
-          <!-- 错误 -->
-          <div v-if="!msg.pending && msg.error" class="error-block">
-            <el-alert type="error" :title="$t('chat.execution_failed')" :closable="false">
-              <pre>{{ msg.error }}</pre>
-            </el-alert>
-          </div>
-
-              <!-- 答案：SQL + 结果 / SQL 错误（pending 期间也支持渐进展示） -->
-              <div v-if="msg.record && (msg.record.sql || msg.record.exec_result || msg.record.sql_error)" class="answer">
-            <div v-if="msg.record.sql" class="sql-block">
-              <div class="block-title">SQL</div>
-              <pre><code>{{ msg.record.sql }}</code></pre>
-            </div>
-            <div v-if="msg.record.sql_error" class="error-block">
-              <el-alert type="error" :title="$t('chat.execution_failed')" :closable="false">
-                <pre>{{ msg.record.sql_error }}</pre>
-              </el-alert>
-            </div>
-            <div v-else-if="msg.record.exec_result" class="result-block">
-              <div class="result-header">
-                <div class="block-title">
-                  {{ $t('chat.result') }}
-                  <span class="muted">
-                    {{ $t('chat.rows', { n: msg.record.exec_result.row_count ?? 0 }) }}
-                  </span>
                 </div>
-                <div class="chart-toolbar">
-                  <el-tooltip
-                    v-for="opt in CHART_OPTIONS"
-                    :key="opt.value"
-                    :content="$t(opt.label)"
-                    placement="top"
-                    :show-after="300"
-                  >
-                    <el-button
-                      text
-                      class="tool-btn"
-                      :class="{
-                        active:
-                          getChartType(i, msg.record!.chart_type) === opt.value,
-                      }"
-                      @click="setChartType(i, opt.value)"
-                    >
-                      <el-icon :size="16">
-                        <component :is="opt.icon" />
-                      </el-icon>
-                    </el-button>
-                  </el-tooltip>
-                  <span
-                    v-if="getChartType(i, msg.record!.chart_type) !== 'table'"
-                    class="divider"
-                  />
-                  <el-tooltip
-                    v-if="getChartType(i, msg.record!.chart_type) !== 'table'"
-                    :content="getShowLabel(i) ? $t('chat.hide_label') : $t('chat.show_label')"
-                    placement="top"
-                    :show-after="300"
-                  >
-                    <el-button
-                      text
-                      class="tool-btn"
-                      :class="{ active: getShowLabel(i) }"
-                      @click="toggleShowLabel(i)"
-                    >
-                      <el-icon :size="16">
-                        <View v-if="getShowLabel(i)" />
-                        <Hide v-else />
-                      </el-icon>
-                    </el-button>
-                  </el-tooltip>
-                </div>
-              </div>
+              </section>
 
-              <template v-if="getChartType(i, msg.record!.chart_type) === 'table'">
-                <el-table
-                  :data="
-                    slicedRows(i, msg.record.exec_result.rows)?.map((row) =>
-                      Object.fromEntries(
-                        (msg.record!.exec_result!.columns || []).map((c, idx) => [c, row[idx]])
-                      )
-                    )
-                  "
-                  stripe
-                  size="small"
-                  border
+              <section class="result-col">
+                <div class="panel-title">结果展现</div>
+                <div v-if="hasSummary(msg)" class="block summary-block result-card">
+                  <div class="block-header static">
+                    <el-icon class="block-icon summary" :size="14"><ChatDotRound /></el-icon>
+                    <span class="block-title">{{ $t('chat.summary') }}</span>
+                  </div>
+                  <div class="summary-body">
+                    <MarkdownContent :content="msg.record!.summary" />
+                  </div>
+                </div>
+
+                <div v-if="hasSqlAnswer(msg)" class="answer-text result-text-card result-card">
+                  <MarkdownContent :content="msg.record!.sql_answer" />
+                </div>
+
+                <div v-if="!msg.pending && msg.error" class="block error-block result-card">
+                  <el-alert type="error" :title="$t('chat.execution_failed')" :closable="false">
+                    <pre>{{ msg.error }}</pre>
+                  </el-alert>
+                </div>
+
+                <div
+                  v-if="msg.record && (msg.record.sql || msg.record.exec_result || msg.record.sql_error)"
+                  class="answer"
                 >
-                  <el-table-column
-                    v-for="col in msg.record.exec_result.columns || []"
-                    :key="col"
-                    :prop="col"
-                    :label="col"
-                  />
-                </el-table>
-                <el-pagination
-                  v-if="(msg.record.exec_result.row_count ?? 0) > PAGE_SIZE"
-                  :current-page="getPage(i)"
-                  :page-size="PAGE_SIZE"
-                  :total="msg.record.exec_result.row_count ?? 0"
-                  layout="prev, pager, next, total"
-                  small
-                  class="pagination"
-                  @current-change="(p: number) => setPage(i, p)"
-                />
-              </template>
-              <div v-else class="chart-wrapper">
-                <ChartComponent
-                  :id="msg.record!.id || i"
-                  :type="
-                    getChartType(i, msg.record!.chart_type) as
-                      | 'column'
-                      | 'bar'
-                      | 'line'
-                      | 'pie'
-                  "
-                  :columns="msg.record.exec_result.columns || []"
-                  :rows="msg.record.exec_result.rows || []"
-                  :show-label="getShowLabel(i)"
-                />
-              </div>
+                  <div v-if="msg.record.sql_error" class="block error-block result-card">
+                    <el-alert type="error" :title="$t('chat.execution_failed')" :closable="false">
+                      <pre>{{ msg.record.sql_error }}</pre>
+                    </el-alert>
+                  </div>
+
+                  <div v-if="msg.record.exec_result || msg.record.sql" class="result-block result-card">
+                    <div class="result-switch">
+                      <button
+                        class="switch-tab"
+                        :class="{ active: getResultPanelTab(i, msg) === 'chart' }"
+                        @click="setResultPanelTab(i, 'chart')"
+                      >
+                        {{ $t('chat.result_tab.chart') }}
+                      </button>
+                      <button
+                        class="switch-tab"
+                        :class="{ active: getResultPanelTab(i, msg) === 'data' }"
+                        @click="setResultPanelTab(i, 'data')"
+                      >
+                        {{ $t('chat.result_tab.data') }}
+                      </button>
+                      <button
+                        class="switch-tab"
+                        :class="{ active: getResultPanelTab(i, msg) === 'sql' }"
+                        @click="setResultPanelTab(i, 'sql')"
+                      >
+                        {{ $t('chat.result_tab.sql') }}
+                      </button>
+                    </div>
+
+                    <div
+                      v-if="
+                        getResultPanelTab(i, msg) === 'chart' &&
+                        getChartType(i, msg.record!.chart_type) !== 'table' &&
+                        msg.record.exec_result
+                      "
+                      class="result-section"
+                    >
+                      <div class="result-header">
+                        <div class="result-title">{{ $t('chat.result_tab.chart') }}</div>
+                        <div class="chart-toolbar">
+                          <el-tooltip
+                            v-for="opt in CHART_OPTIONS.filter((it) => it.value !== 'table')"
+                            :key="opt.value"
+                            :content="$t(opt.label)"
+                            placement="top"
+                            :show-after="300"
+                          >
+                            <button
+                              class="tool-btn"
+                              :class="{ active: getChartType(i, msg.record!.chart_type) === opt.value }"
+                              @click="setChartType(i, opt.value)"
+                            >
+                              <el-icon :size="14">
+                                <component :is="opt.icon" />
+                              </el-icon>
+                            </button>
+                          </el-tooltip>
+                          <span class="divider" />
+                          <el-tooltip
+                            :content="getShowLabel(i) ? $t('chat.hide_label') : $t('chat.show_label')"
+                            placement="top"
+                            :show-after="300"
+                          >
+                            <button
+                              class="tool-btn"
+                              :class="{ active: getShowLabel(i) }"
+                              @click="toggleShowLabel(i)"
+                            >
+                              <el-icon :size="14">
+                                <View v-if="getShowLabel(i)" />
+                                <Hide v-else />
+                              </el-icon>
+                            </button>
+                          </el-tooltip>
+                        </div>
+                      </div>
+                      <div class="chart-wrapper">
+                        <ChartComponent
+                          :id="msg.record!.id || i"
+                          :type="
+                            getChartType(i, msg.record!.chart_type) as
+                              | 'column'
+                              | 'bar'
+                              | 'line'
+                              | 'pie'
+                          "
+                          :columns="msg.record.exec_result?.columns || []"
+                          :rows="msg.record.exec_result?.rows || []"
+                          :show-label="getShowLabel(i)"
+                          :axes-override="chartConfigToAxes(msg.record.chart_config)"
+                        />
+                      </div>
+                    </div>
+
+                    <div v-if="getResultPanelTab(i, msg) === 'data' && msg.record.exec_result" class="result-section">
+                      <div class="result-header">
+                        <div class="result-title">
+                          {{ $t('chat.result_tab.data') }}
+                          <span class="muted">
+                            {{
+                              $t('chat.rows', {
+                                n:
+                                  msg.record.exec_result.row_count ??
+                                  msg.record.exec_result.rows?.length ??
+                                  0,
+                              })
+                            }}
+                          </span>
+                        </div>
+                      </div>
+                      <el-table
+                        :data="
+                          slicedRows(i, msg.record.exec_result.rows)?.map((row) =>
+                            Object.fromEntries(
+                              (msg.record!.exec_result!.columns || []).map((c, idx) => [c, row[idx]])
+                            )
+                          )
+                        "
+                        stripe
+                        size="small"
+                        border
+                      >
+                        <el-table-column
+                          v-for="col in msg.record.exec_result.columns || []"
+                          :key="col"
+                          :prop="col"
+                          :label="col"
+                        />
+                      </el-table>
+                      <el-pagination
+                        v-if="(msg.record.exec_result.row_count ?? 0) > PAGE_SIZE"
+                        :current-page="getPage(i)"
+                        :page-size="PAGE_SIZE"
+                        :total="msg.record.exec_result.row_count ?? 0"
+                        layout="prev, pager, next, total"
+                        small
+                        class="pagination"
+                        @current-change="(p: number) => setPage(i, p)"
+                      />
+                    </div>
+
+                    <div v-if="getResultPanelTab(i, msg) === 'sql'" class="result-section">
+                      <div class="result-header">
+                        <div class="result-title">{{ $t('chat.result_tab.sql') }}</div>
+                      </div>
+                      <div class="sql-block">
+                        <pre><code>{{ msg.record.sql || '--' }}</code></pre>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
             </div>
           </div>
 
-          <div v-if="!msg.pending" class="meta">{{ datetimeFormat(msg.create_time) }}</div>
+          <div v-if="!msg.pending" class="message-footer">
+            <span class="meta">{{ datetimeFormat(msg.create_time) }}</span>
+            <div class="actions">
+              <button class="action-btn" @click="onCopy(msg)">
+                <el-icon :size="13"><CopyDocument /></el-icon>
+                <span>复制</span>
+              </button>
+              <button class="action-btn" :disabled="!canRetry(i, msg)" @click="onRetry(i)">
+                <el-icon :size="13"><Refresh /></el-icon>
+                <span>重试</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </template>
@@ -318,289 +686,871 @@ void props
 .chat-record {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 20px;
+  width: min(1400px, 96%);
+  margin: 0 auto;
 
-  .row {
+  .turn {
     display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    width: 100%;
   }
 
   .meta {
-    font-size: 12px;
-    color: #8f959e;
-    margin-top: 6px;
+    font-size: 11.5px;
+    color: #98a2b3;
   }
 
-  // 用户消息（右）
-  .user-row {
-    flex-direction: column;
-    align-items: flex-end;
+  .avatar {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: 2px;
+    box-shadow: 0 2px 6px rgba(16, 24, 40, 0.08);
+  }
 
-    .user-bubble {
-      max-width: 70%;
-      padding: 10px 14px;
-      background: var(--el-color-primary-light-9);
-      border-radius: 12px;
-      font-size: 14px;
+  .user-avatar {
+    background: #fff;
+    color: #475467;
+    border: 1px solid var(--border-color);
+  }
+
+  .ai-avatar {
+    background: linear-gradient(135deg, #1677ff 0%, #69b1ff 100%);
+    color: #fff;
+  }
+
+  .turn-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  /* ============== 用户消息 ============== */
+  .user-turn {
+    flex-direction: row-reverse;
+
+    .turn-body {
+      align-items: flex-end;
+    }
+
+    .bubble {
+      background: var(--el-color-primary);
+      color: #fff;
+      border-radius: 12px 12px 4px 12px;
+      padding: 9px 13px;
+      font-size: 13.5px;
       line-height: 22px;
       white-space: pre-wrap;
       word-break: break-word;
-      color: #1f2329;
+      max-width: 76%;
+      box-shadow: 0 2px 8px rgba(22, 119, 255, 0.18);
     }
   }
 
-  // AI 消息（左）
-  .assistant-row {
-    gap: 12px;
-    align-items: flex-start;
-
-    .avatar {
-      width: 28px;
-      height: 28px;
-      border-radius: 50%;
-      background: var(--el-color-primary);
-      color: #fff;
+  /* ============== 助手消息 ============== */
+  .assistant-turn {
+    .agent-name {
       display: flex;
       align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
+      gap: 6px;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: #344054;
+
+      .mode-tag {
+        padding: 1px 8px;
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--el-color-primary);
+        background: var(--el-color-primary-light-9);
+        border-radius: 10px;
+      }
     }
 
-    .assistant-body {
-      flex: 1;
+    .assistant-card {
+      display: block;
+      background: #fff;
+      border: 1px solid var(--border-color);
+      border-radius: 12px 12px 12px 4px;
+      padding: 12px 14px;
+      box-shadow: 0 1px 3px rgba(16, 24, 40, 0.05);
+    }
+
+    .assistant-split {
+      display: grid;
+      grid-template-columns: minmax(300px, 38%) minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+
+      &.stacked-layout {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 8px;
+
+        .thinking-col {
+          border-right: 0;
+          padding-right: 0;
+
+          .thinking-panel {
+            position: static;
+            max-height: none;
+            overflow: visible;
+            padding-right: 0;
+          }
+        }
+
+        .result-col {
+          padding-left: 0;
+        }
+      }
+    }
+
+    .thinking-col,
+    .result-col {
       min-width: 0;
       display: flex;
       flex-direction: column;
       gap: 12px;
+    }
 
-      // 思考过程卡片
-      .thinking-card {
-        align-self: flex-start;
-        max-width: 100%;
-        background: #f5f6f7;
-        border: 1px solid #eef0f2;
-        border-radius: 8px;
+    .thinking-col {
+      padding-right: 6px;
+      border-right: 1px solid #edf1f6;
+      position: relative;
+
+      .thinking-panel {
+        position: sticky;
+        top: 4px;
+        max-height: calc(100vh - 220px);
+        overflow: auto;
+        padding-right: 2px;
+      }
+    }
+
+    .result-col {
+      padding-left: 4px;
+    }
+
+    .result-card {
+      background: #fff;
+      border: 1px solid var(--border-color-light);
+      border-radius: 10px;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+    }
+
+    .panel-title {
+      height: 26px;
+      display: inline-flex;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 600;
+      color: #475467;
+      letter-spacing: 0.2px;
+      text-transform: uppercase;
+    }
+
+    .message-footer {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding-left: 4px;
+
+      .actions {
+        display: flex;
+        gap: 4px;
+      }
+
+      .action-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        height: 24px;
+        padding: 0 8px;
+        background: transparent;
+        border: none;
+        border-radius: 6px;
+        font-size: 11.5px;
+        color: #98a2b3;
+        cursor: pointer;
+
+        &:hover:not(:disabled) {
+          background: rgba(31, 35, 41, 0.06);
+          color: #475467;
+        }
+
+        &:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+      }
+    }
+  }
+
+  /* ============== 通用 block ============== */
+  .block {
+    border-radius: 8px;
+    font-size: 13px;
+  }
+
+  .block-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 10px;
+    cursor: pointer;
+    user-select: none;
+
+    &.static {
+      cursor: default;
+    }
+
+    .caret {
+      transition: transform 0.15s ease;
+      color: #98a2b3;
+      transform: rotate(-90deg);
+
+      &.open {
+        transform: rotate(0deg);
+      }
+    }
+
+    .block-icon {
+      &.plan { color: var(--el-color-primary); }
+      &.tool { color: #f79009; }
+      &.summary { color: var(--el-color-primary); }
+    }
+
+    .block-title {
+      font-weight: 500;
+      color: #344054;
+    }
+
+    .badge {
+      margin-left: auto;
+      padding: 1px 8px;
+      font-size: 11px;
+      color: #475467;
+      background: rgba(31, 35, 41, 0.06);
+      border-radius: 10px;
+
+      &.plan-badge {
+        color: var(--el-color-primary);
+        background: var(--el-color-primary-light-9);
+      }
+    }
+
+    .elapsed {
+      margin-left: auto;
+      font-size: 11.5px;
+      color: #98a2b3;
+    }
+  }
+
+  .muted {
+    color: #98a2b3;
+    font-size: 12px;
+  }
+
+  /* plans */
+  .plans-block {
+    background: var(--el-color-primary-light-9);
+    border: 1px solid var(--el-color-primary-light-7);
+
+    .plan-body {
+      list-style: none;
+      padding: 4px 12px 10px 32px;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+
+      .plan-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        line-height: 20px;
         font-size: 13px;
-        color: #1f2329;
-        padding: 6px 12px;
+        position: relative;
 
-          &.pending {
-            display: inline-flex;
+        &::before {
+          content: '';
+          position: absolute;
+          left: -13px;
+          top: 16px;
+          bottom: -10px;
+          width: 1px;
+          background: #cfe1ff;
+        }
+
+        &:last-child::before {
+          display: none;
+        }
+
+        .plan-icon {
+          flex-shrink: 0;
+          &.ok { color: #16a34a; }
+          &.error { color: var(--el-color-danger); }
+          &.running { color: var(--el-color-primary); }
+        }
+
+        .plan-label {
+          color: #344054;
+        }
+
+        .plan-agent {
+          font-size: 11px;
+          color: var(--el-color-primary);
+          background: rgba(255, 255, 255, 0.7);
+          border: 1px solid var(--el-color-primary-light-7);
+          border-radius: 10px;
+          padding: 0 6px;
+          line-height: 18px;
+        }
+
+        &.error .plan-label {
+          color: var(--el-color-danger);
+        }
+
+        .error-text {
+          color: var(--el-color-danger);
+          font-size: 12px;
+        }
+      }
+    }
+  }
+
+  /* 执行计划与工具调用之间增加一点呼吸感 */
+  .plans-block + .tools-block {
+    margin-top: 6px;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
+  @keyframes statusPulse {
+    0% { opacity: 0.45; }
+    50% { opacity: 1; }
+    100% { opacity: 0.45; }
+  }
+
+  /* tools */
+  .tools-block {
+    background: #fafbfc;
+    border: 1px solid var(--border-color-light);
+
+    .tools-body {
+      padding: 0 12px 10px 32px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+
+      .tool-group {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+
+        .tool-group-title {
+          font-size: 11px;
+          color: #98a2b3;
+          padding: 1px 0;
+        }
+
+        .tool-item {
+          border-left: 2px solid var(--border-color);
+          padding-left: 8px;
+          display: flex;
+          flex-direction: column;
+          gap: 5px;
+
+          .tool-trigger {
+            display: flex;
             align-items: center;
-            gap: 8px;
-            color: #646a73;
+            justify-content: space-between;
+            gap: 6px;
+            padding: 6px 8px;
+            border: 1px solid var(--border-color-light);
+            border-radius: 7px;
+            background: #fff;
+            cursor: pointer;
+            transition: background 0.15s ease;
 
-            .icon {
-              color: var(--el-color-primary);
+            &:hover {
+              background: #f8fafc;
+            }
+
+            .tool-trigger-main {
+              display: flex;
+              align-items: center;
+              gap: 7px;
+              min-width: 0;
+              flex: 1;
+            }
+
+            .tool-type-icon {
+              flex-shrink: 0;
+              color: #667085;
+            }
+
+            .tool-meta {
+              min-width: 0;
+              flex: 1;
+            }
+
+            .tool-title-line {
+              display: flex;
+              align-items: center;
+              gap: 6px;
+              min-width: 0;
+            }
+
+            .tool-name {
+              font-size: 11.5px;
+              font-weight: 500;
+              color: #344054;
+              flex-shrink: 0;
+            }
+
+            .tool-subtitle {
+              font-size: 11px;
+              color: #98a2b3;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+            }
+
+            .tool-args {
+              margin-top: 1px;
+              font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
+              font-size: 10.5px;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+            }
+
+            .tool-trigger-action {
+              display: inline-flex;
+              align-items: center;
+              gap: 6px;
+              flex-shrink: 0;
+            }
+
+            .caret {
+              color: #98a2b3;
+              transform: rotate(-90deg);
+              transition: transform 0.15s ease;
+
+              &.open {
+                transform: rotate(0deg);
+              }
+            }
+
+            .tool-status {
+              height: 16px;
+              padding: 0 5px;
+              border-radius: 10px;
+              display: inline-flex;
+              align-items: center;
+              gap: 3px;
+              font-size: 10px;
+              font-weight: 500;
+              border: 1px solid transparent;
+
+              .status-dot {
+                width: 5px;
+                height: 5px;
+                border-radius: 50%;
+                background: currentColor;
+                display: inline-block;
+              }
+
+              &.running {
+                color: #667085;
+                background: #f8fafc;
+                border-color: #e4e7ec;
+
+                .status-dot {
+                  animation: statusPulse 1.2s ease-in-out infinite;
+                }
+              }
+
+              &.ok {
+                color: #475467;
+                background: #f8fafc;
+                border-color: #e4e7ec;
+              }
+
+              &.error {
+                color: #b42318;
+                background: #fef6f6;
+                border-color: #fecdca;
+              }
+            }
+
+            .tool-elapsed {
+              font-size: 10.5px;
+            }
+
+            .caret.small {
+              margin-left: -2px;
             }
           }
 
-          &.streaming {
-            border-color: var(--el-color-primary-light-7);
-            background: var(--el-color-primary-light-9);
-
-            .streaming-icon {
-              color: var(--el-color-primary);
-              margin-right: 2px;
-            }
+          .tool-detail {
+            margin-left: 8px;
+            padding: 0 0 0 8px;
+            border-left: 2px solid var(--border-color-light);
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
           }
 
-        .thinking-header {
+          .tool-thought, .tool-content {
+            font-size: 11px;
+            color: #475467;
+            padding-left: 2px;
+            line-height: 17px;
+
+            .tag {
+              display: inline-block;
+              padding: 0 4px;
+              border-radius: 3px;
+              background: rgba(31, 35, 41, 0.08);
+              font-size: 10px;
+              color: #475467;
+              margin-right: 4px;
+            }
+
+            pre {
+              margin: 2px 0 0 0;
+              white-space: pre-wrap;
+              word-break: break-word;
+              font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
+              font-size: 10.5px;
+              line-height: 1.5;
+              color: #475467;
+              max-height: 108px;
+              overflow: auto;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /* summary */
+  .summary-block {
+    background: linear-gradient(180deg, var(--el-color-primary-light-9) 0%, #fff 100%);
+    border-color: var(--el-color-primary-light-7);
+
+    .summary-body {
+      padding: 4px 14px 12px;
+    }
+  }
+
+  /* thinking */
+  .thinking-block {
+    background: #f5f7fb;
+    border: 1px solid var(--border-color-light);
+
+    &.pending {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #475467;
+      padding: 8px 12px;
+
+      .icon {
+        color: var(--el-color-primary);
+      }
+    }
+
+    &.streaming {
+      border-color: var(--el-color-primary-light-7);
+      background: var(--el-color-primary-light-9);
+
+      .streaming-icon {
+        color: var(--el-color-primary);
+      }
+    }
+
+    .thinking-body {
+      padding: 4px 12px 10px 32px;
+
+      .steps {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+
+        .step {
           display: flex;
           align-items: center;
-          gap: 6px;
-          height: 28px;
-          cursor: pointer;
-          user-select: none;
+          gap: 8px;
+          line-height: 20px;
+          font-size: 13px;
+          position: relative;
 
-          .caret {
-            transition: transform 0.15s ease;
-            color: #646a73;
-            transform: rotate(-90deg);
-
-            &.open {
-              transform: rotate(0deg);
-            }
+          &::before {
+            content: '';
+            position: absolute;
+            left: -13px;
+            top: 16px;
+            bottom: -10px;
+            width: 1px;
+            background: #dce3ec;
           }
 
-          .title {
+          &:last-child::before {
+            display: none;
+          }
+
+          .step-icon {
+            flex-shrink: 0;
+            &.ok { color: var(--el-color-primary); }
+            &.error { color: var(--el-color-danger); }
+          }
+
+          .step-label {
+            color: #344054;
             font-weight: 500;
           }
 
-          .elapsed {
-            margin-left: 6px;
-            font-size: 12px;
-          }
-        }
-
-        .thinking-body {
-          padding: 8px 4px 4px 18px;
-          border-top: 1px dashed #e1e3e6;
-          margin-top: 4px;
-
-          .steps {
-            list-style: none;
-            padding: 0;
-            margin: 0;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-
-            .step {
-              display: flex;
-              align-items: center;
-              gap: 8px;
-              line-height: 20px;
-              font-size: 13px;
-
-              .step-icon {
-                flex-shrink: 0;
-
-                &.ok {
-                  color: var(--el-color-primary);
-                }
-
-                &.error {
-                  color: var(--el-color-danger);
-                }
-              }
-
-              .step-label {
-                color: #1f2329;
-                font-weight: 500;
-              }
-
-              .step-detail {
-                font-size: 12px;
-                color: #646a73;
-              }
-
-              .step-elapsed {
-                margin-left: auto;
-                font-size: 12px;
-                color: #8f959e;
-              }
-            }
+          .step-detail {
+            color: #98a2b3;
           }
 
-          .reasoning {
-            margin-top: 10px;
-            padding-top: 10px;
-            border-top: 1px dashed #e1e3e6;
-
-            pre {
-              margin: 0;
-              padding: 0;
-              font-family: inherit;
-              font-size: 13px;
-              line-height: 22px;
-              color: #1f2329;
-              white-space: pre-wrap;
-              word-break: break-word;
-            }
+          .step-elapsed {
+            margin-left: auto;
           }
         }
       }
 
-      .answer {
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-      }
+      .reasoning {
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px dashed var(--border-color-light);
 
-      .block-title {
-        font-weight: 500;
-        font-size: 13px;
-        margin-bottom: 8px;
-        display: flex;
-        gap: 8px;
-        align-items: baseline;
-        color: #1f2329;
-      }
-
-      .sql-block pre {
-        background: #1e1e1e;
-        color: #d4d4d4;
-        padding: 12px;
-        border-radius: 8px;
-        overflow-x: auto;
-        font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
-        font-size: 12px;
-        line-height: 1.5;
-        margin: 0;
-      }
-
-          .result-block {
-        background: #fafbfc;
-        padding: 12px;
-        border-radius: 8px;
-        border: 1px solid #eef0f2;
-
-        .result-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-          margin-bottom: 8px;
-
-          .block-title {
-            margin-bottom: 0;
-          }
-
-          .chart-toolbar {
-            display: flex;
-            align-items: center;
-            gap: 2px;
-            padding: 2px;
-            border-radius: 6px;
-            border: 1px solid #dee0e3;
-            background: #fff;
-
-            .tool-btn {
-              width: 26px;
-              height: 26px;
-              min-width: 26px;
-              border-radius: 4px;
-              color: #646a73;
-              padding: 0;
-
-              &:hover {
-                background: rgba(31, 35, 41, 0.06);
-              }
-
-              &.active {
-                background: var(--el-color-primary-light-9);
-                color: var(--el-color-primary);
-              }
-            }
-
-            .divider {
-              width: 1px;
-              height: 14px;
-              background: rgba(31, 35, 41, 0.15);
-              margin: 0 2px;
-            }
-          }
-        }
-
-        .chart-wrapper {
-          width: 100%;
-          height: 360px;
-          background: #fff;
-          border-radius: 6px;
-          padding: 8px;
-        }
-
-        .pagination {
-          margin-top: 12px;
+        pre {
+          margin: 0;
+          padding: 0;
+          font-family: inherit;
+          font-size: 12.5px;
+          line-height: 22px;
+          color: #475467;
+          white-space: pre-wrap;
+          word-break: break-word;
         }
       }
+    }
+  }
 
-      .error-block pre {
+  /* answer */
+  .answer {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .answer-text {
+    color: #1f2329;
+    line-height: 22px;
+  }
+
+  .result-text-card {
+    padding: 10px 12px;
+    border-radius: 10px;
+  }
+
+  .sql-block pre {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 14px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
+    font-size: 12.5px;
+    line-height: 1.55;
+    margin: 0;
+  }
+
+  .result-block {
+    background: #fafbfc;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border-color: var(--border-color-light);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+
+    .result-switch {
+      align-self: flex-end;
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      padding: 2px;
+      border: 1px solid #d9e2ef;
+      border-radius: 7px;
+      background: #fff;
+
+      .switch-tab {
+        height: 22px;
+        padding: 0 10px;
+        border: 0;
+        border-radius: 5px;
         background: transparent;
-        color: var(--el-color-danger);
-        padding: 0;
-        margin: 0;
-        white-space: pre-wrap;
+        color: #667085;
+        font-size: 11px;
+        line-height: 22px;
+        cursor: pointer;
+
+        &.active {
+          color: var(--el-color-primary);
+          background: var(--el-color-primary-light-9);
+          font-weight: 600;
+        }
+      }
+    }
+
+    .result-section {
+      background: #fff;
+      border: 1px solid var(--border-color-light);
+      border-radius: 8px;
+      padding: 10px 10px 9px;
+    }
+
+    .result-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: -10px -10px 10px;
+      padding: 8px 10px;
+      background: #f8fafc;
+      border-bottom: 1px solid #e9edf3;
+      border-radius: 8px 8px 0 0;
+
+      .result-title {
+        font-size: 12px;
+        font-weight: 600;
+        color: #344054;
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+      }
+    }
+
+    .chart-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 1px;
+      padding: 2px;
+      border-radius: 6px;
+      border: 1px solid #d9e2ef;
+      background: #fff;
+
+      .tool-btn {
+        width: 24px;
+        height: 24px;
+        border-radius: 4px;
+        background: transparent;
+        border: none;
+        color: #475467;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+
+        &:hover {
+          background: rgba(31, 35, 41, 0.06);
+        }
+
+        &.active {
+          background: var(--el-color-primary-light-9);
+          color: var(--el-color-primary);
+        }
+      }
+
+      .divider {
+        width: 1px;
+        height: 12px;
+        background: #d9e2ef;
+        margin: 0 2px;
+      }
+    }
+
+    .chart-wrapper {
+      width: 100%;
+      height: 340px;
+      background: #fff;
+      border-radius: 6px;
+      padding: 8px;
+    }
+
+    .pagination {
+      margin-top: 12px;
+    }
+
+    :deep(.el-table) {
+      border-color: #e6eaf0;
+      --el-table-border-color: #e6eaf0;
+      --el-table-header-bg-color: #f8fafc;
+      --el-table-row-hover-bg-color: #f5f8ff;
+      --el-table-current-row-bg-color: #edf3ff;
+      --el-table-text-color: #344054;
+      --el-table-header-text-color: #475467;
+      font-size: 12px;
+    }
+
+    :deep(.el-table th.el-table__cell) {
+      font-weight: 600;
+      font-size: 11.5px;
+      padding: 7px 0;
+    }
+
+    :deep(.el-table td.el-table__cell) {
+      padding: 7px 0;
+    }
+  }
+
+  .error-block pre {
+    background: transparent;
+    color: var(--el-color-danger);
+    padding: 0;
+    margin: 0;
+    white-space: pre-wrap;
+  }
+
+  @media (max-width: 1200px) {
+    .assistant-turn {
+      .assistant-split {
+        grid-template-columns: 1fr;
+      }
+      .thinking-col {
+        border-right: 0;
+        border-bottom: 1px dashed var(--border-color-light);
+        padding-right: 0;
+        padding-bottom: 8px;
+      .thinking-panel {
+        position: static;
+        max-height: none;
+        overflow: visible;
+      }
+      }
+      .result-col {
+        padding-left: 0;
       }
     }
   }
