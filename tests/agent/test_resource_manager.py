@@ -91,6 +91,7 @@ def test_install_default_resources_registers_expected_tools(fresh_manager: Resou
         "find_related_datasources",
         "recent_questions",
         "calculate",
+        "render_html_report",
         "terminate",
     }
     assert set(pack.names()) == expected

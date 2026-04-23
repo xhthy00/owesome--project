@@ -46,3 +46,4 @@ class ConversationRecord(SQLModel, table=True):
     plan_states: Optional[str] = Field(default=None, sa_column=Column(Text))
     tool_calls: Optional[str] = Field(default=None, sa_column=Column(Text))
     summary: Optional[str] = Field(default=None, sa_column=Column(Text))
+    reports: Optional[str] = Field(default=None, sa_column=Column(Text))

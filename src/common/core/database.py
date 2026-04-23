@@ -50,6 +50,7 @@ def _ensure_columns() -> None:
             "plan_states": "TEXT",
             "tool_calls": "TEXT",
             "summary": "TEXT",
+            "reports": "TEXT",
         },
     }
 

@@ -642,3 +642,35 @@ def test_team_disable_tool_agent_falls_back_to_data_analyst(monkeypatch):
         e == "tool_call" and p.get("agent") == "ToolExpert"
         for e, p in events
     )
+
+
+def test_team_report_event_carries_sub_task_index(monkeypatch):
+    _patch_db(
+        monkeypatch,
+        lambda *_a, **_kw: (True, "ok", {"columns": [], "rows": []}),
+    )
+    llm = _ScriptedLlm(
+        [
+            '{"plans":["输出报告"]}',
+            '{"tool":"render_html_report","args":{"title":"TeamReport","html":"<html><body>ok</body></html>"}}',
+            '{"tool":"terminate","args":{"final_answer":"done"}}',
+            '{"chart_type":"table"}',
+            "报告已生成。",
+        ]
+    )
+    events, emit = _collect_events()
+    req = ChatRequest(question="输出报告", datasource_id=1)
+    _run(
+        run_team_stream(
+            request=req,
+            current_user_id=1,
+            emit=emit,
+            llm_client=llm,
+            persist=False,
+        )
+    )
+
+    report = next((p for e, p in events if e == "report"), None)
+    assert report is not None
+    assert report["title"] == "TeamReport"
+    assert report.get("sub_task_index") == 0

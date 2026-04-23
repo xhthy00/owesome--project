@@ -7,6 +7,7 @@ import {
   type AgentSpeak,
   type ChartConfig,
   type PlanState,
+  type ReportPayload,
   type ReasoningStep,
   type ToolCallRecord,
 } from '@/views/chat/typed'
@@ -83,7 +84,7 @@ export const chatApi = {
    * 事件契约（与后端 `/chat/chat-stream` 对齐）：
    * - 兼容层（agent/team/legacy 通用）：step / reasoning / sql / result / error / done
    * - Agent 模式扩展：tool_call / tool_result / agent_thought / final_answer
-   * - Team 模式扩展：plan / plan_update / agent_speak / chart / summary
+   * - Team 模式扩展：plan / plan_update / agent_speak / chart / summary / report
    *
    * 客户端按"存在即调用"处理——若后端未发某事件，对应 handler 不会触发。
    */
@@ -118,6 +119,7 @@ export const chatApi = {
       onAgentSpeak?: (speak: AgentSpeak) => void
       onChart?: (payload: { chart_type: string; chart_config?: ChartConfig }) => void
       onSummary?: (content: string) => void
+      onReport?: (payload: ReportPayload) => void
     },
     signal?: AbortSignal
   ): Promise<void> => {
@@ -181,6 +183,15 @@ export const chatApi = {
             break
           case 'summary':
             handlers.onSummary?.(data?.content || '')
+            break
+          case 'report':
+            handlers.onReport?.({
+              title: data?.title || 'Report',
+              html: data?.html || '',
+              mode: data?.mode,
+              sub_task_index: data?.sub_task_index,
+              agent: data?.agent,
+            })
             break
         }
       },

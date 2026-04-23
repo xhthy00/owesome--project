@@ -82,6 +82,7 @@ class ConversationRecordResponse(BaseModel):
     plan_states: Optional[List[Dict[str, Any]]] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     summary: Optional[str] = None
+    reports: Optional[List[Dict[str, Any]]] = None
 
     class Config:
         from_attributes = True

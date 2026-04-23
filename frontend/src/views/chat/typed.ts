@@ -58,6 +58,14 @@ export interface AgentSpeak {
   extra?: Record<string, any>
 }
 
+export interface ReportPayload {
+  title: string
+  html: string
+  mode?: string
+  sub_task_index?: number
+  agent?: string
+}
+
 export class ChatRecord {
   id?: number
   conversation_id?: number
@@ -83,6 +91,7 @@ export class ChatRecord {
   summary?: string
   /** ReAct 循环里按 (round, sub_task_index) 合并的工具调用记录。 */
   tool_calls?: ToolCallRecord[]
+  reports?: ReportPayload[]
 
   constructor(data?: any) {
     if (!data) return
@@ -107,6 +116,38 @@ export class ChatRecord {
     this.plan_states = Array.isArray(data.plan_states) ? data.plan_states : undefined
     this.summary = data.summary || undefined
     this.tool_calls = Array.isArray(data.tool_calls) ? data.tool_calls : undefined
+    this.reports = Array.isArray(data.reports) ? data.reports : this._deriveReportsFromToolCalls(this.tool_calls)
+  }
+
+  private _deriveReportsFromToolCalls(toolCalls?: ToolCallRecord[]): ReportPayload[] | undefined {
+    if (!Array.isArray(toolCalls) || !toolCalls.length) return undefined
+    const reports: ReportPayload[] = []
+    for (const call of toolCalls) {
+      const data = call.data
+      if (!data || typeof data !== 'object') continue
+      if (data.output_type === 'html' && typeof data.html === 'string' && data.html.trim()) {
+        reports.push({
+          title: typeof data.title === 'string' && data.title.trim() ? data.title : 'Report',
+          html: data.html,
+          mode: typeof data.mode === 'string' ? data.mode : undefined,
+          sub_task_index: call.sub_task_index,
+        })
+        continue
+      }
+      if (Array.isArray((data as any).chunks)) {
+        for (const chunk of (data as any).chunks) {
+          if (chunk?.output_type !== 'html') continue
+          if (typeof chunk?.content !== 'string' || !chunk.content.trim()) continue
+          reports.push({
+            title: typeof chunk?.title === 'string' && chunk.title.trim() ? chunk.title : 'Report',
+            html: chunk.content,
+            mode: typeof data.mode === 'string' ? data.mode : undefined,
+            sub_task_index: call.sub_task_index,
+          })
+        }
+      }
+    }
+    return reports.length ? reports : undefined
   }
 }
 

@@ -29,6 +29,7 @@ import { ElMessage } from 'element-plus'
 import type { ChatMessage, ChartConfig, ChatRecord, ToolCallRecord } from './typed'
 import type { ChartAxis, ChartTypes } from './component/BaseChart'
 import ChartComponent from './component/ChartComponent.vue'
+import ReportPreview from './component/ReportPreview.vue'
 import MarkdownContent from '@/components/markdown/MarkdownContent.vue'
 import { datetimeFormat } from '@/utils/utils'
 
@@ -105,7 +106,25 @@ const hasToolCalls = (msg: any): boolean => {
 }
 
 const hasSummary = (msg: any): boolean => !!msg?.record?.summary
+const hasReports = (msg: any): boolean => !!(msg?.record?.reports && msg.record.reports.length)
 const hasSqlAnswer = (msg: any): boolean => !!msg?.record?.sql_answer
+
+const groupedReports = (msg: any): Array<{ sub_task_index?: number; items: any[] }> => {
+  const reports = msg?.record?.reports || []
+  if (!Array.isArray(reports) || !reports.length) return []
+  const groups = new Map<number | '__none__', any[]>()
+  for (const r of reports) {
+    const k: number | '__none__' =
+      typeof r?.sub_task_index === 'number' ? r.sub_task_index : '__none__'
+    const list = groups.get(k) || []
+    list.push(r)
+    groups.set(k, list)
+  }
+  return Array.from(groups.entries()).map(([k, list]) => ({
+    sub_task_index: k === '__none__' ? undefined : k,
+    items: list,
+  }))
+}
 
 const isPlanExpanded = (i: number, pending = false): boolean => {
   if (i in expandPlans.value) return expandPlans.value[i]
@@ -489,6 +508,31 @@ void props
                   </div>
                   <div class="summary-body">
                     <MarkdownContent :content="msg.record!.summary" />
+                  </div>
+                </div>
+
+                <div v-if="hasReports(msg)" class="block report-block result-card">
+                  <div class="block-header static">
+                    <el-icon class="block-icon summary" :size="14"><Reading /></el-icon>
+                    <span class="block-title">{{ $t('chat.report') }}</span>
+                    <span class="badge">{{ $t('chat.report_count', { n: msg.record!.reports!.length }) }}</span>
+                  </div>
+                  <div class="report-body">
+                    <div
+                      v-for="(grp, gi) in groupedReports(msg)"
+                      :key="gi"
+                      class="report-group"
+                    >
+                      <div v-if="grp.sub_task_index != null" class="report-group-title">
+                        {{ $t('chat.sub_task_label', { n: grp.sub_task_index + 1 }) }}
+                      </div>
+                      <ReportPreview
+                        v-for="(rp, ri) in grp.items"
+                        :key="`${gi}-${ri}`"
+                        :title="rp.title || `Report ${ri + 1}`"
+                        :html="rp.html"
+                      />
+                    </div>
                   </div>
                 </div>
 
@@ -1254,6 +1298,29 @@ void props
 
     .summary-body {
       padding: 4px 14px 12px;
+    }
+  }
+
+  .report-block {
+    border-color: #d9e2ef;
+
+    .report-body {
+      padding: 6px 10px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .report-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .report-group-title {
+      font-size: 11px;
+      color: #98a2b3;
+      padding: 2px 2px 0;
     }
   }
 

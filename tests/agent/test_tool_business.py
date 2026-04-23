@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -357,6 +358,95 @@ def test_execute_sql_failure_returns_observation_not_exception(fake_datasource, 
     assert result.data["error"].startswith("syntax error")
 
 
+def test_render_html_report_inline_sanitizes_script(fake_datasource):
+    result = _run(
+        biz.render_html_report.execute(
+            datasource_id=1,
+            html='<div onclick="alert(1)">ok</div><script>alert(2)</script>',
+            title="demo",
+        )
+    )
+    assert "已生成" in result.content
+    assert result.data["output_type"] == "html"
+    assert result.data["title"] == "demo"
+    assert isinstance(result.data.get("chunks"), list) and result.data["chunks"][0]["output_type"] == "html"
+    assert "<script" in result.data["html"].lower()
+    assert "onclick=" not in result.data["html"].lower()
+
+
+def test_render_html_report_template_mode(fake_datasource, monkeypatch):
+    base = Path(__file__).resolve().parents[2]
+    template_dir = base / "src" / "agent" / "resource" / "templates"
+    template_dir.mkdir(parents=True, exist_ok=True)
+    template_path = template_dir / "unit_test_template.html"
+    template_path.write_text("<h1>{{TITLE}}</h1><p>{{BODY}}</p>", encoding="utf-8")
+    monkeypatch.setattr(biz, "_report_template_dir", lambda: template_dir)
+    try:
+        result = _run(
+            biz.render_html_report.execute(
+                datasource_id=1,
+                template_name="unit_test_template.html",
+                data={"TITLE": "T", "BODY": "B"},
+            )
+        )
+    finally:
+        template_path.unlink(missing_ok=True)
+    assert result.data["mode"] == "template"
+    assert "<h1>T</h1>" in result.data["html"]
+
+
+def test_render_html_report_template_path_and_string_data(fake_datasource, monkeypatch):
+    base = Path(__file__).resolve().parents[2]
+    template_dir = base / "src" / "agent" / "resource" / "templates"
+    template_dir.mkdir(parents=True, exist_ok=True)
+    template_path = template_dir / "unit_test_template_2.html"
+    template_path.write_text("<div>{{A}}-{{B}}</div>", encoding="utf-8")
+    monkeypatch.setattr(biz, "_report_template_dir", lambda: template_dir)
+    try:
+        result = _run(
+            biz.render_html_report.execute(
+                datasource_id=1,
+                template_path="unit_test_template_2.html",
+                data='{"A":"x","B":"y"}',
+            )
+        )
+    finally:
+        template_path.unlink(missing_ok=True)
+    assert result.data["mode"] == "template"
+    assert "<div>x-y</div>" in result.data["html"]
+
+
+def test_render_html_report_template_failure_falls_back_to_inline(fake_datasource):
+    result = _run(
+        biz.render_html_report.execute(
+            datasource_id=1,
+            template_name="not_exists.html",
+            html="<html><body>fallback</body></html>",
+            title="fallback",
+        )
+    )
+    assert result.data["mode"] == "inline"
+    assert "fallback" in result.data["html"]
+
+
+def test_render_html_report_file_mode_reads_workspace_file(fake_datasource):
+    base = Path(__file__).resolve().parents[2]
+    file_path = base / "tmp_report_test.html"
+    file_path.write_text("<html><body>hello</body></html>", encoding="utf-8")
+    try:
+        result = _run(
+            biz.render_html_report.execute(
+                datasource_id=1,
+                file_path=str(file_path),
+                title="from-file",
+            )
+        )
+    finally:
+        file_path.unlink(missing_ok=True)
+    assert result.data["mode"] == "file"
+    assert "hello" in result.data["html"]
+
+
 def test_find_related_datasources_lists_active(monkeypatch):
     @contextlib.contextmanager
     def fake_session():
@@ -426,8 +516,8 @@ def test_build_default_toolpack_binds_and_hides_params(monkeypatch):
     assert "execute_sql" in pack
     assert "calculate" in pack
     assert "terminate" in pack
-    # 6 原业务工具 + find_related_tables + calculate + terminate = 9
-    assert len(pack) == 9
+    # 6 原业务工具 + find_related_tables + calculate + render_html_report + terminate = 10
+    assert len(pack) == 10
 
     prompt = pack.render_prompt()
     assert "datasource_id(" not in prompt
@@ -439,8 +529,8 @@ def test_build_default_toolpack_binds_and_hides_params(monkeypatch):
 def test_build_default_toolpack_without_terminate():
     pack = biz.build_default_toolpack(datasource_id=1, include_terminate=False)
     assert "terminate" not in pack
-    # 6 原业务工具 + find_related_tables + calculate = 8（不含 terminate）
-    assert len(pack) == 8
+    # 6 原业务工具 + find_related_tables + calculate + render_html_report = 9（不含 terminate）
+    assert len(pack) == 9
 
 
 def test_build_default_toolpack_no_bindings():

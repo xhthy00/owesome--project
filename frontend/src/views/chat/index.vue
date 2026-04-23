@@ -168,6 +168,7 @@ const onSend = async (text: string) => {
     plans: undefined,
     plan_states: [],
     tool_calls: [],
+    reports: [],
   })
   const placeholderIdx = messages.value.length
   messages.value.push({
@@ -270,6 +271,12 @@ const onSend = async (text: string) => {
         },
         onSummary: (content) => {
           liveRecord.summary = content
+        },
+        onReport: (payload) => {
+          const list = liveRecord.reports || (liveRecord.reports = [])
+          list.push(payload)
+          liveRecord.reports = [...list]
+          scrollToBottom()
         },
       }
     )

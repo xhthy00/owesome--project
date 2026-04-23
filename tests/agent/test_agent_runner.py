@@ -266,6 +266,35 @@ def test_schema_exploration_without_execute_sql_is_success(monkeypatch):
     assert len(sample_exec_calls) == 1
 
 
+def test_render_html_report_emits_report_event(monkeypatch):
+    _patch_db(
+        monkeypatch,
+        lambda *a, **kw: (True, "ok", {"columns": [], "rows": []}),
+    )
+    llm = _ScriptedLlm(
+        [
+            '{"tool":"render_html_report","args":{"title":"R","html":"<html><body><h1>x</h1></body></html>"}}',
+            '{"tool":"terminate","args":{"final_answer":"done"}}',
+        ]
+    )
+    events, emit = _collect_events()
+    req = ChatRequest(question="生成报告", datasource_id=1)
+    _run(
+        run_agent_stream(
+            request=req,
+            current_user_id=1,
+            emit=emit,
+            llm_client=llm,
+            persist=False,
+        )
+    )
+
+    report = next((p for e, p in events if e == "report"), None)
+    assert report is not None
+    assert report["title"] == "R"
+    assert "<h1>x</h1>" in report["html"]
+
+
 def test_chat_request_agent_mode_accepts_agent_team_legacy():
     req = ChatRequest(question="q", datasource_id=1)
     assert req.agent_mode == "agent"

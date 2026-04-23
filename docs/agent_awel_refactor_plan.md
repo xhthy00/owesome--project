@@ -1120,6 +1120,9 @@ Phase A 完成后再开 PR #3（Phase B）。Phase A 期间不动任何 `src/cha
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v10.2 | 2026-04-23 | **Phase G-2（报告持久化）**。将 HTML 报告从“仅流式事件可见”升级为“可回放资产”：①`chat_conversation_record` 新增 `reports` 字段（TEXT JSON）；`init_db` 自动补列迁移。②`agent_runner` 在发出 `report` 事件时同步累积到运行态 `state.reports`，并在 agent/team 持久化时写入 record。③`chat` API 读取详情时回传 `reports`。④前端 `ChatRecord` 优先消费 record.reports，历史会话刷新后仍可直接展示报告，不再依赖 tool_calls 反推。 |
+| v10.1 | 2026-04-23 | **Phase G-1.1（HTML 报告对齐补丁）**。①`render_html_report` 增加 DB-GPT 风格兼容：支持 `template_path` 别名、`data` 可传 JSON 字符串；返回数据新增 `chunks=[{output_type:"html",title,content}]`，便于多端消费。②模板失败时若同时给了 inline `html`，自动降级回退（不中断主流程）。③前端 `ChatRecord` 报告面板改为按 `sub_task_index` 分组展示，便于 team 模式定位“哪个子任务产出了哪份报告”。 |
+| v10 | 2026-04-23 | **Phase G-1（高保真对齐 DB-GPT HTML 报告交付）**。①后端新增工具 `render_html_report`（`src/agent/resource/tool/business.py`），支持三种模式：`html` 直传、`template_name/template_path + data`、`file_path`；输出结构对齐 DB-GPT 语义：`{output_type:"html", title, html, mode}`。②基础安全收口：移除 `<script>...</script>`、剔除 `on*` 事件属性、拦截 `javascript:` URL。③SSE 扩展 `report` 事件：`agent_runner` 在 `tool_result.data.output_type=="html"` 时自动转发，team 模式透传 `sub_task_index` 便于前端按子任务分组。④前端新增 `ReportPreview.vue`（iframe `srcdoc` 预览 + 展开弹窗 + 复制/下载）并接入 `ChatRecord` 报告面板；`typed.ts` 增 `ReportPayload`/`reports`，`chat.ts` 增 `onReport`。⑤新增模板示例 `src/agent/resource/templates/basic_report.html`，并在 DataAnalyst/ToolExpert prompt 明确“用户要求 HTML 报告时优先调用 `render_html_report`”。⑥测试补齐：工具三模式 + report 事件（agent/team）回归，ResourceManager 默认工具集断言包含 `render_html_report`。 |
 | v1 | 2026-04-22 | 初版：4 Agent 固定 DAG + 单入口 + 精简自实现（Phase A~D） |
 | v2 | 2026-04-22 | 追加 Tool/Skill 体系：`BaseTool`/`FunctionTool`/`@tool`/`ToolPack`/`ToolAction`/`ToolAgent` + 7 个内置工具，新增 Phase E（Tool 内核）、Phase F（工具注入）；SSE 新增 `tool_call`/`tool_result`；DB 新增 `tool_registry`（可选）/`tool_call_log` |
 | v3 | 2026-04-22 | 重排里程碑：**Tool 最小内核前置到 Phase A**（DataAnalyst Phase B 即装备工具）；`DEFAULT_TOOLS` Python 硬编码；`tool_registry` 表推迟到 Phase G；Phase E 职责改为"工具补齐 + 审计 + ToolAgent"；Phase F 职责改为"前端可视化 + ToolAgent 接入 DAG"；总工期 4 周 → 6.5 周 |
@@ -1223,3 +1226,10 @@ python -m src.agent.smoke -d 1 -u 7 --max-rounds 12 --full "..."
 - **不要给 ToolExpert 的任务：** 需要反复试 SQL、依赖复杂业务语义、需要图表推荐上下文（这些更适合 DataAnalyst + Charter）。
 - **灰度策略：** 生产初期建议 `enable_tool_agent=false` 观察 1~2 天，确认 Planner 输出稳定后再按会话/租户逐步打开。
 - **诊断指标：** 关注 `tool_call_log` 中 `agent_name=ToolExpert` 的成功率、平均轮数、`calculate` 占比；异常升高时先关开关再排查 Planner prompt。
+
+### 16.5 HTML 报告交付建议（Phase G-1）
+
+- **对齐语义：** HTML 作为“最终交付物”统一走 `render_html_report`，不要把长 HTML 混在普通 `terminate` 文本里。
+- **模式选择：** 临时一次性报告用 `html`；可复用报告优先 `template_name/template_path + data`；已有产物文件用 `file_path`。
+- **团队模式落地：** 若某个 sub_task 负责产报告，前端通过 `report.sub_task_index` 可直接归到对应子任务。
+- **前端安全与体验：** 报告使用 iframe `srcdoc` 渲染（与主页面隔离），并保留复制/下载/展开能力，方便二次交付。

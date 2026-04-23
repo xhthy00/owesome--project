@@ -126,6 +126,7 @@ def get_conversation(
             "plan_states": _parse_json(getattr(record, "plan_states", None), None),
             "tool_calls": _parse_json(getattr(record, "tool_calls", None), None),
             "summary": getattr(record, "summary", None),
+            "reports": _parse_json(getattr(record, "reports", None), None),
         }
         record_responses.append(ConversationRecordResponse(**record_dict))
 
@@ -386,6 +387,7 @@ def _persist_record(
     plan_states: Optional[list[dict]] = None,
     tool_calls: Optional[list[dict]] = None,
     summary: Optional[str] = None,
+    reports: Optional[list[dict]] = None,
 ) -> int:
     """Persist a conversation record. Returns record_id (0 if no conversation)."""
     if not request.conversation_id:
@@ -409,6 +411,7 @@ def _persist_record(
             plan_states=plan_states,
             tool_calls=tool_calls,
             summary=summary,
+            reports=reports,
         )
         return record.id or 0
     except Exception as e:

@@ -119,6 +119,7 @@ def create_conversation_record(
     plan_states: Optional[List[Any]] = None,
     tool_calls: Optional[List[Any]] = None,
     summary: Optional[str] = None,
+    reports: Optional[List[Any]] = None,
 ) -> ConversationRecord:
     """Create a new conversation record."""
     exec_result_str = None
@@ -147,6 +148,7 @@ def create_conversation_record(
     tool_calls_str = (
         json.dumps(tool_calls, ensure_ascii=False) if tool_calls is not None else None
     )
+    reports_str = json.dumps(reports, ensure_ascii=False) if reports is not None else None
 
     record = ConversationRecord(
         conversation_id=conversation_id,
@@ -169,6 +171,7 @@ def create_conversation_record(
         plan_states=plan_states_str,
         tool_calls=tool_calls_str,
         summary=summary,
+        reports=reports_str,
     )
     session.add(record)
 

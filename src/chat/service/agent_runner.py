@@ -92,6 +92,7 @@ async def run_agent_stream(
         chart_config=None,
         agent_mode="agent",
         tool_calls=list(phase.state.tool_calls),
+        reports=list(phase.state.reports),
     )
 
 
@@ -253,6 +254,7 @@ async def run_team_stream(
                 sub_task_agents=plan_agents,
                 plan_states=plan_states_for_persist,
                 tool_calls=[tc for _, p in sub_phases for tc in p.state.tool_calls],
+                reports=[rp for _, p in sub_phases for rp in p.state.reports],
             )
         return 0
 
@@ -296,6 +298,7 @@ async def run_team_stream(
         plan_states=plan_states_for_persist,
         tool_calls=[tc for _, p in sub_phases for tc in p.state.tool_calls],
         summary=summary_text or None,
+        reports=[rp for _, p in sub_phases for rp in p.state.reports],
     )
 
 
@@ -665,12 +668,13 @@ class _RunState:
         # 仅 team 模式下非 None——让 forwarder 把 sub_task_index 也注入到
         # tool_call / tool_result / agent_thought 等 payload 里，前端才能按子任务归组。
         self.sub_task_index: int | None = sub_task_index
+        self.reports: list[dict[str, Any]] = []
 
 
 #: "sub_task 内部产生"的事件——在 team 模式下给它们统一贴 sub_task_index。
 #: step 已在 run_team_stream 主协程里显式 tag，此处避免重复。
 _SUB_TASK_SCOPED_EVENTS: tuple[str, ...] = (
-    "tool_call", "tool_result", "agent_thought", "final_answer",
+    "tool_call", "tool_result", "agent_thought", "final_answer", "report",
 )
 
 
@@ -691,6 +695,7 @@ def _make_forwarder(state: _RunState, emit: EmitCallback) -> EmitCallback:
 
         if event == "tool_result":
             await _maybe_emit_legacy_sql_result(state, payload, emit)
+            await _maybe_emit_report(payload, emit, state)
 
     return forward
 
@@ -804,6 +809,32 @@ async def _maybe_emit_legacy_sql_result(
     await emit("result", state.last_exec_result)
 
 
+async def _maybe_emit_report(
+    payload: dict[str, Any],
+    emit: EmitCallback,
+    state: "_RunState | None" = None,
+) -> None:
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return
+    if data.get("output_type") != "html":
+        return
+    html = str(data.get("html") or "")
+    if not html.strip():
+        return
+    report_payload: dict[str, Any] = {
+        "title": str(data.get("title") or "Report"),
+        "html": html,
+        "mode": str(data.get("mode") or "inline"),
+        "agent": payload.get("agent"),
+    }
+    if payload.get("sub_task_index") is not None:
+        report_payload["sub_task_index"] = payload.get("sub_task_index")
+    if state is not None:
+        state.reports.append(dict(report_payload))
+    await emit("report", report_payload)
+
+
 # --------------------------------------------------------------------------- #
 # 持久化
 # --------------------------------------------------------------------------- #
@@ -828,6 +859,7 @@ def _persist_sync(
     plan_states: list[dict[str, Any]] | None = None,
     tool_calls: list[dict[str, Any]] | None = None,
     summary: str | None = None,
+    reports: list[dict[str, Any]] | None = None,
 ) -> int:
     """在工作线程里开短事务并写 record。失败吞掉返回 0。"""
     if not request.conversation_id:
@@ -856,6 +888,7 @@ def _persist_sync(
                 plan_states=plan_states,
                 tool_calls=tool_calls,
                 summary=summary,
+                reports=reports,
             )
             return record.id or 0
     except Exception as e:  # noqa: BLE001

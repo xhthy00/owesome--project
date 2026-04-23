@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 _MAX_PLANS = 6
 _DEFAULT_SUB_TASK_AGENT = "DataAnalyst"
 _TOOL_EXPERT_AGENT = "ToolExpert"
+_TOOL_EXPERT_HINTS = (
+    "html", "report", "dashboard", "template", "web page", "webpage",
+    "网页", "页面", "报告", "可视化报告", "图文报告",
+)
 
 PLANNER_DESC = """[你的职责]
 把用户问题拆成可独立执行的子任务，每个子任务都应该可以交给一个**只能写单条 SQL**
@@ -113,18 +117,30 @@ def _normalize_plan_item(item: Any) -> dict[str, str] | None:
         text = item.strip()
         if not text:
             return None
-        return {"task": text, "sub_task_agent": _DEFAULT_SUB_TASK_AGENT}
+        return {"task": text, "sub_task_agent": _infer_sub_task_agent(text)}
     if isinstance(item, dict):
         text = str(item.get("task") or item.get("plan") or "").strip()
         if not text:
             return None
-        raw_agent = str(item.get("sub_task_agent") or _DEFAULT_SUB_TASK_AGENT).strip()
-        sub_task_agent = _TOOL_EXPERT_AGENT if raw_agent == _TOOL_EXPERT_AGENT else _DEFAULT_SUB_TASK_AGENT
+        raw_agent = str(item.get("sub_task_agent") or "").strip()
+        if raw_agent == _TOOL_EXPERT_AGENT:
+            sub_task_agent = _TOOL_EXPERT_AGENT
+        elif raw_agent == _DEFAULT_SUB_TASK_AGENT:
+            sub_task_agent = _DEFAULT_SUB_TASK_AGENT
+        else:
+            sub_task_agent = _infer_sub_task_agent(text)
         return {"task": text, "sub_task_agent": sub_task_agent}
     text = str(item).strip()
     if not text:
         return None
-    return {"task": text, "sub_task_agent": _DEFAULT_SUB_TASK_AGENT}
+    return {"task": text, "sub_task_agent": _infer_sub_task_agent(text)}
+
+
+def _infer_sub_task_agent(task: str) -> str:
+    lowered = (task or "").lower()
+    if any(h in lowered for h in _TOOL_EXPERT_HINTS):
+        return _TOOL_EXPERT_AGENT
+    return _DEFAULT_SUB_TASK_AGENT
 
 
 def _fallback_single_plan(question: str, reason: str) -> ActionOutput:

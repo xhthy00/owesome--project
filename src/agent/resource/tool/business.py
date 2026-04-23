@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import re
+import json
+from pathlib import Path
 from typing import Any
 
 from src.agent.resource.tool.base import ToolResult
@@ -133,6 +135,9 @@ def list_tables(datasource_id: int) -> ToolResult:
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]+")
 _FIND_RELATED_DEFAULT_LIMIT = 10
 _FIND_RELATED_HARD_CAP = 20
+_REPORT_MAX_HTML_LEN = 500_000
+_REPORT_TEMPLATE_SAFE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_REPORT_PLACEHOLDER_RE = re.compile(r"\{\{([A-Za-z0-9_]+)\}\}")
 
 
 def _tokenize_question(question: str) -> list[str]:
@@ -183,6 +188,128 @@ def _score_table_against_tokens(table: dict[str, Any], tokens: list[str]) -> tup
         if needle and needle in hay:
             matched.append(tok)
     return len(matched), matched
+
+
+def _report_base_dir() -> Path:
+    return Path(__file__).resolve().parents[4]
+
+
+def _report_template_dir() -> Path:
+    return _report_base_dir() / "src" / "agent" / "resource" / "templates"
+
+
+def _sanitize_report_html(raw_html: str) -> str:
+    html = raw_html
+    # 保留 <script> 以支持 HTML 报告中的图表渲染逻辑（ECharts/G2 等）。
+    # 这里只做最小风险清洗：去掉内联事件与 javascript: URL。
+    html = re.sub(r"(?i)\s+on[a-z]+\s*=\s*(['\"]).*?\1", "", html)
+    html = re.sub(r"(?i)\s+on[a-z]+\s*=\s*[^\s>]+", "", html)
+    html = re.sub(r"""(?i)(href|src)\s*=\s*(['"])\s*javascript:[^'"]*\2""", r'\1="#"', html)
+    return html
+
+
+def _render_template_html(template_name: str, data: dict[str, Any]) -> str:
+    template_dir = _report_template_dir()
+    template_dir.mkdir(parents=True, exist_ok=True)
+    if not _REPORT_TEMPLATE_SAFE_RE.match(template_name):
+        raise ValueError("template_name 仅允许字母/数字/._-")
+
+    path = (template_dir / template_name).resolve()
+    path.relative_to(template_dir.resolve())
+    if not path.is_file():
+        raise ValueError(f"模板不存在: {template_name}")
+    raw = path.read_text(encoding="utf-8")
+
+    def _replace(m: re.Match[str]) -> str:
+        key = m.group(1)
+        return str(data.get(key, ""))
+
+    return _REPORT_PLACEHOLDER_RE.sub(_replace, raw)
+
+
+def _parse_report_data(data: Any) -> dict[str, Any]:
+    if data is None:
+        return {}
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, str):
+        try:
+            parsed = json.loads(data)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _read_report_file(file_path: str) -> str:
+    base = _report_base_dir().resolve()
+    target = Path(file_path).expanduser().resolve()
+    target.relative_to(base)
+    if not target.is_file():
+        raise ValueError(f"文件不存在: {file_path}")
+    return target.read_text(encoding="utf-8")
+
+
+@tool()
+def render_html_report(
+    html: str = "",
+    title: str = "Report",
+    template_name: str = "",
+    template_path: str = "",
+    data: dict[str, Any] | None = None,
+    file_path: str = "",
+) -> ToolResult:
+    """生成 HTML 报告载荷（DB-GPT html_interpreter 风格）。
+
+    三种模式（优先级从高到低）：
+    1. template_name/template_path + data：读取模板并替换 ``{{KEY}}``；
+    2. file_path：读取工作区内已有 HTML 文件；
+    3. html：直接使用传入 HTML 字符串。
+    """
+    mode = "inline"
+    try:
+        template = (template_name or "").strip() or (template_path or "").strip()
+        report_data = _parse_report_data(data)
+
+        if template:
+            mode = "template"
+            try:
+                html = _render_template_html(template, report_data)
+            except Exception as e:
+                # 对齐 DB-GPT 的体验：模板失败不直接中断；若调用方还给了 inline html，就降级回退。
+                if html and html.strip():
+                    mode = "inline"
+                else:
+                    return ToolResult(content=f"报告生成失败：{e}", data=None)
+        elif file_path.strip():
+            mode = "file"
+            html = _read_report_file(file_path.strip())
+        elif not html.strip():
+            return ToolResult(content="报告生成失败：未提供 html/template_name/file_path。", data=None)
+
+        html = html.strip()
+        if len(html) > _REPORT_MAX_HTML_LEN:
+            return ToolResult(
+                content=f"报告生成失败：HTML 长度超过上限 {_REPORT_MAX_HTML_LEN} 字符。",
+                data=None,
+            )
+        safe_html = _sanitize_report_html(html)
+        payload = {
+            "output_type": "html",
+            "title": (title or "Report").strip() or "Report",
+            "html": safe_html,
+            "mode": mode,
+            "chunks": [
+                {
+                    "output_type": "html",
+                    "title": (title or "Report").strip() or "Report",
+                    "content": safe_html,
+                }
+            ],
+        }
+        return ToolResult(content=f"HTML 报告已生成（mode={mode}）。", data=payload)
+    except Exception as e:
+        return ToolResult(content=f"报告生成失败：{e}", data=None)
 
 
 @tool()
@@ -460,6 +587,7 @@ def default_business_tools() -> list[FunctionTool | TerminateTool]:
         find_related_datasources,
         recent_questions,
         calculate,
+        render_html_report,
     ]
 
 
