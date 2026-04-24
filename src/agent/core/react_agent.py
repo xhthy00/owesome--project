@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -48,6 +49,16 @@ class ReActAgent(ConversableAgent):
     """
 
     max_react_rounds: int = 10
+    _TOOL_CALL_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "required": ["tool", "args"],
+        "properties": {
+            "thoughts": {"type": "string"},
+            "tool": {"type": "string"},
+            "args": {"type": "object"},
+        },
+        "additionalProperties": True,
+    }
 
     def __init__(
         self,
@@ -70,6 +81,20 @@ class ReActAgent(ConversableAgent):
         base = super()._build_prompt_variables(reply)
         base.setdefault("tools_prompt", self.tool_pack.render_prompt())
         return base
+
+    async def thinking(self, messages: list[dict[str, str]], sender: Any) -> str:
+        """优先请求结构化输出，失败时回退普通文本 chat。"""
+        if self.llm_client is None:
+            raise RuntimeError(f"{self.name}: llm_client is required for thinking()")
+        chat_with_schema = getattr(self.llm_client, "chat_with_schema", None)
+        if callable(chat_with_schema):
+            try:
+                obj = await chat_with_schema(messages, self._TOOL_CALL_SCHEMA)
+                if isinstance(obj, dict):
+                    return json.dumps(obj, ensure_ascii=False)
+            except Exception:
+                logger.debug("[%s] structured output failed, fallback plain chat", self.name, exc_info=True)
+        return await super().thinking(messages, sender)
 
     async def generate_reply(
         self,

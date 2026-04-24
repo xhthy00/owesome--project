@@ -31,6 +31,8 @@ from src.agent.util.json_parser import parse_json_tolerant
 
 logger = logging.getLogger(__name__)
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.DOTALL | re.IGNORECASE)
+_TOOL_NAME_RE = re.compile(r"""tool\s*:\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?""", re.IGNORECASE)
+_CLI_ARG_RE = re.compile(r"""--([A-Za-z_][A-Za-z0-9_]*)\s+("([^"]*)"|'([^']*)'|([^\s,}\]]+))""")
 
 
 class ToolAction(Action):
@@ -78,45 +80,71 @@ class ToolAction(Action):
                 return None
             return cleaned
 
+        def _parse_tool_call_fallback(raw_text: str) -> dict[str, Any] | None:
+            text = str(raw_text or "")
+            if "[TOOL_CALL]" not in text and "tool:" not in text:
+                return None
+            cleaned = _THINK_BLOCK_RE.sub("", text)
+            m_tool = _TOOL_NAME_RE.search(cleaned)
+            if not m_tool:
+                return None
+            tool_name = m_tool.group(1)
+
+            args: dict[str, Any] = {}
+            for m in _CLI_ARG_RE.finditer(cleaned):
+                key = m.group(1)
+                value = m.group(3) or m.group(4) or m.group(5) or ""
+                args[key] = value
+            if not args:
+                m_q = re.search(r"""question\s*:\s*("([^"]*)"|'([^']*)')""", cleaned, re.IGNORECASE)
+                if m_q:
+                    args["question"] = m_q.group(2) or m_q.group(3) or ""
+
+            return {"tool": tool_name, "args": args}
+
         try:
             parsed = parse_json_tolerant(ai_message)
         except ValueError as e:
-            fallback_answer = _extract_non_json_final_answer(ai_message)
-            if fallback_answer and TERMINATE_TOOL_NAME in self.tool_pack:
-                try:
-                    result = await self.tool_pack.invoke(
-                        TERMINATE_TOOL_NAME,
-                        {"final_answer": fallback_answer},
-                    )
-                    _audit(
-                        tool_name=TERMINATE_TOOL_NAME,
-                        success=True,
-                        args={"final_answer": fallback_answer},
-                        result_preview=result.content,
-                    )
-                    return ActionOutput(
-                        is_exe_success=True,
-                        content=result.content,
-                        action=TERMINATE_TOOL_NAME,
-                        thoughts=None,
-                        observations=result.content,
-                        terminate=result.is_final,
-                        extra={
-                            "tool_args": {"final_answer": fallback_answer},
-                            "tool_data": result.data,
-                            "tool_extra": result.extra,
-                        },
-                    )
-                except Exception:
-                    logger.exception("fallback terminate failed")
-            msg = f"无法从 LLM 输出解析 JSON：{e}. 请严格返回 {{\"tool\": ..., \"args\": ...}} 结构。"
-            _audit(tool_name=self.name, success=False, args=None, result_preview=msg)
-            return ActionOutput(
-                is_exe_success=False,
-                content=msg,
-                action=self.name,
-                thoughts=None,
-            )
+            fallback_tool_call = _parse_tool_call_fallback(ai_message)
+            if fallback_tool_call is not None:
+                parsed = fallback_tool_call
+            else:
+                fallback_answer = _extract_non_json_final_answer(ai_message)
+                if fallback_answer and TERMINATE_TOOL_NAME in self.tool_pack:
+                    try:
+                        result = await self.tool_pack.invoke(
+                            TERMINATE_TOOL_NAME,
+                            {"final_answer": fallback_answer},
+                        )
+                        _audit(
+                            tool_name=TERMINATE_TOOL_NAME,
+                            success=True,
+                            args={"final_answer": fallback_answer},
+                            result_preview=result.content,
+                        )
+                        return ActionOutput(
+                            is_exe_success=True,
+                            content=result.content,
+                            action=TERMINATE_TOOL_NAME,
+                            thoughts=None,
+                            observations=result.content,
+                            terminate=result.is_final,
+                            extra={
+                                "tool_args": {"final_answer": fallback_answer},
+                                "tool_data": result.data,
+                                "tool_extra": result.extra,
+                            },
+                        )
+                    except Exception:
+                        logger.exception("fallback terminate failed")
+                msg = f"无法从 LLM 输出解析 JSON：{e}. 请严格返回 {{\"tool\": ..., \"args\": ...}} 结构。"
+                _audit(tool_name=self.name, success=False, args=None, result_preview=msg)
+                return ActionOutput(
+                    is_exe_success=False,
+                    content=msg,
+                    action=self.name,
+                    thoughts=None,
+                )
 
         if not isinstance(parsed, dict):
             msg = "LLM 输出必须是 JSON 对象，不能是数组或标量。"

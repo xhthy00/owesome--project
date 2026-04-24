@@ -29,9 +29,15 @@ def boom() -> str:
     raise RuntimeError("kaboom")
 
 
+@tool()
+def find_related_datasources(question: str) -> str:
+    """Find datasource by question."""
+    return f"ds-for:{question}"
+
+
 @pytest.fixture()
 def pack():
-    return ToolPack(tools=[add, TerminateTool(), boom])
+    return ToolPack(tools=[add, find_related_datasources, TerminateTool(), boom])
 
 
 @pytest.fixture()
@@ -110,6 +116,21 @@ def test_unparsable_json_with_report_text_fallbacks_to_terminate(pack, audit_spy
     assert len(audit_spy) == 1
     assert audit_spy[0]["tool_name"] == "terminate"
     assert audit_spy[0]["success"] is True
+
+
+def test_tool_call_pseudo_syntax_is_parsed_and_invoked(pack):
+    action = ToolAction(tool_pack=pack)
+    ai_msg = """
+<think>先找数据源</think>
+[TOOL_CALL]
+{tool: "find_related_datasources", args: {
+  --question "学生成绩分数分布 各班平均分"
+}}
+"""
+    out = _run(action.run(ai_msg))
+    assert out.is_exe_success is True
+    assert out.action == "find_related_datasources"
+    assert out.observations == "ds-for:学生成绩分数分布 各班平均分"
 
 
 def test_missing_tool_field_returns_fail(pack):

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -120,3 +121,36 @@ class LangChainLlmClient:
         if isinstance(content, str):
             return content
         return "".join(str(part) for part in content)
+
+    async def chat_with_schema(
+        self,
+        messages: list[dict[str, str]],
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        """使用 LangChain structured output 获取结构化结果。
+
+        约定返回 dict；若底层模型不支持或返回非对象则抛异常，让调用方回退到普通 chat。
+        """
+        model = self._ensure_chat_model()
+        if not hasattr(model, "with_structured_output"):
+            raise RuntimeError("model does not support structured output")
+
+        lc_messages = _dict_messages_to_langchain(messages)
+        structured_model = model.with_structured_output(schema)
+        ainvoke = getattr(structured_model, "ainvoke", None)
+        if ainvoke is not None:
+            response = await ainvoke(lc_messages)
+        else:
+            response = await asyncio.to_thread(structured_model.invoke, lc_messages)
+
+        if isinstance(response, str):
+            try:
+                parsed = json.loads(response)
+            except Exception as e:
+                raise RuntimeError(f"structured output is not valid JSON: {e}") from e
+            if not isinstance(parsed, dict):
+                raise RuntimeError("structured output JSON is not an object")
+            return parsed
+        if not isinstance(response, dict):
+            raise RuntimeError(f"structured output is not an object: {type(response).__name__}")
+        return response

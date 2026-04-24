@@ -210,6 +210,47 @@ const hasPlans = (msg: any): boolean => {
   return !!(r && r.plans && r.plans.length > 0)
 }
 
+const _subTaskCalls = (msg: any, subTaskIndex: number): ToolCallRecord[] => {
+  const calls: ToolCallRecord[] = msg?.record?.tool_calls || []
+  return calls.filter((c) => (c.sub_task_index ?? -1) === subTaskIndex)
+}
+
+const _subTaskProgress = (msg: any, st: any): number => {
+  const idx = Number(st?.index ?? -1)
+  if (idx < 0) return 0
+  if (st?.state === 'ok') return 100
+  const calls = _subTaskCalls(msg, idx)
+  if (!calls.length) return st?.state === 'error' ? 1 : 0
+  const finished = calls.filter((c) => c.success === true || c.success === false).length
+  const pct = Math.round((finished / calls.length) * 100)
+  if (st?.state === 'running') return Math.min(pct, 99)
+  return Math.max(0, Math.min(100, pct))
+}
+
+const _executionProgress = (msg: any): number => {
+  const states = msg?.record?.plan_states || []
+  if (!states.length) {
+    const calls: ToolCallRecord[] = msg?.record?.tool_calls || []
+    if (!calls.length) return 0
+    const finished = calls.filter((c) => c.success === true || c.success === false).length
+    return Math.round((finished / calls.length) * 100)
+  }
+  const sum = states.reduce((acc: number, st: any) => acc + _subTaskProgress(msg, st), 0)
+  return Math.round(sum / states.length)
+}
+
+const _summaryDone = (msg: any): boolean =>
+  !msg?.pending && !!(hasSummary(msg) || hasSqlAnswer(msg) || hasReports(msg) || msg?.record?.sql_error)
+
+const planTotalProgress = (msg: any): number => {
+  const planPct = hasPlans(msg) ? 100 : 0
+  const execPct = _executionProgress(msg)
+  const summaryPct = _summaryDone(msg) ? 100 : 0
+  const weighted = Math.round(planPct * 0.1 + execPct * 0.7 + summaryPct * 0.2)
+  if (_summaryDone(msg)) return 100
+  return Math.max(0, Math.min(99, weighted))
+}
+
 const hasToolCalls = (msg: any): boolean => {
   const r: ChatRecord | undefined = msg.record
   return !!(r && r.tool_calls && r.tool_calls.length > 0)
@@ -502,9 +543,15 @@ void props
                     </el-icon>
                     <el-icon class="block-icon plan" :size="14"><Reading /></el-icon>
                     <span class="block-title">{{ $t('chat.plan') }}</span>
+                    <span class="progress-pct">{{ planTotalProgress(msg) }}%</span>
                     <span class="badge plan-badge">
                       {{ $t('chat.plan_steps', { n: msg.record!.plans!.length }) }}
                     </span>
+                  </div>
+                  <div v-show="isPlanExpanded(i, msg.pending)" class="plan-progress-wrap">
+                    <div class="plan-progress-track">
+                      <div class="plan-progress-fill" :style="{ width: `${planTotalProgress(msg)}%` }" />
+                    </div>
                   </div>
                   <ol v-show="isPlanExpanded(i, msg.pending)" class="plan-body">
                     <li
@@ -524,6 +571,7 @@ void props
                       <span v-if="planAgentLabel(st.sub_task_agent)" class="plan-agent">
                         {{ planAgentLabel(st.sub_task_agent) }}
                       </span>
+                      <span class="plan-progress-num">{{ _subTaskProgress(msg, st) }}%</span>
                       <span v-if="st.state === 'ok' && st.row_count != null" class="muted">
                         {{ $t('chat.rows', { n: st.row_count }) }}
                       </span>
@@ -1140,6 +1188,17 @@ void props
       }
     }
 
+    .progress-pct {
+      margin-left: auto;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--el-color-primary);
+      background: rgba(22, 119, 255, 0.08);
+      border-radius: 10px;
+      padding: 0 8px;
+      line-height: 18px;
+    }
+
     .elapsed {
       margin-left: auto;
       font-size: 11.5px;
@@ -1157,9 +1216,27 @@ void props
     background: var(--el-color-primary-light-9);
     border: 1px solid var(--el-color-primary-light-7);
 
+    .plan-progress-wrap {
+      padding: 0 12px 4px 32px;
+
+      .plan-progress-track {
+        height: 6px;
+        background: #dbe7ff;
+        border-radius: 99px;
+        overflow: hidden;
+      }
+
+      .plan-progress-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #3b82f6 0%, #60a5fa 100%);
+        border-radius: 99px;
+        transition: width 0.25s ease;
+      }
+    }
+
     .plan-body {
       list-style: none;
-      padding: 4px 12px 10px 32px;
+      padding: 2px 12px 10px 32px;
       margin: 0;
       display: flex;
       flex-direction: column;
@@ -1203,6 +1280,16 @@ void props
           color: var(--el-color-primary);
           background: rgba(255, 255, 255, 0.7);
           border: 1px solid var(--el-color-primary-light-7);
+          border-radius: 10px;
+          padding: 0 6px;
+          line-height: 18px;
+        }
+
+        .plan-progress-num {
+          margin-left: auto;
+          font-size: 11px;
+          color: #3b82f6;
+          background: rgba(59, 130, 246, 0.08);
           border-radius: 10px;
           padding: 0 6px;
           line-height: 18px;
