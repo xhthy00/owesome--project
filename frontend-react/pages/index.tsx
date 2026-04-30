@@ -150,7 +150,7 @@ export default function HomePage() {
         <div className="w-full max-w-[860px] rounded-[28px] border border-gray-100 bg-white/95 px-7 pb-4 pt-5 shadow-[0_16px_48px_rgba(0,0,0,0.12),0_6px_20px_rgba(0,0,0,0.08)] backdrop-blur-md dark:border-[#33353b] dark:bg-[#1e1f24]/95 dark:shadow-[0_16px_48px_rgba(0,0,0,0.4)]">
           <Input.TextArea
             autoSize={{ minRows: 3, maxRows: 4 }}
-            bordered={false}
+            variant="borderless"
             placeholder="向您的数据库提问，上传CSV，或生成报告..."
             className="dbgpt-input-font !text-lg !leading-8"
             value={prompt}
@@ -211,7 +211,7 @@ export default function HomePage() {
                         ? "!border-violet-200/60 !bg-[#f3edff]"
                         : "!border-amber-200/60 !bg-[#fff3e8]"
                 }`}
-                bodyStyle={{ padding: 13 }}
+                styles={{ body: { padding: 13 } }}
               >
                 <div className="flex gap-3">
                   <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-lg bg-white/70 text-[#4978c8]">

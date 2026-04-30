@@ -9,6 +9,7 @@ import {
   PlusOutlined,
   ReadOutlined,
   RightOutlined,
+  SafetyCertificateOutlined,
   ThunderboltOutlined
 } from "@ant-design/icons";
 import { Tooltip } from "antd";
@@ -23,6 +24,7 @@ const routes = [
   { key: "explore", path: "/", label: "探索广场", icon: <GlobalOutlined /> },
   { key: "skills", path: "/construct/skills", label: "技能", icon: <ThunderboltOutlined /> },
   { key: "datasource", path: "/construct/database", label: "数据源", icon: <DatabaseOutlined /> },
+  { key: "permission", path: "/construct/permission", label: "权限管理", icon: <SafetyCertificateOutlined /> },
   { key: "knowledge", path: "/construct/knowledge", label: "知识库", icon: <ReadOutlined /> },
   { key: "app", path: "/construct/app", label: "应用管理", icon: <ApartmentOutlined /> }
 ];

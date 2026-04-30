@@ -139,6 +139,24 @@ export default function ChatExecutionPanel({
     }
     return queryResults[selectedQueryIndex];
   }, [queryResults, selectedQueryIndex]);
+  const queryDisplayLabels = useMemo(() => {
+    return queryResults.map((item, idx) => {
+      const cols = item.columns || [];
+      const metricCols = cols.length >= 2 ? cols.slice(1, 4) : cols.slice(0, 3);
+      const metricLabel = metricCols.filter(Boolean).join(" / ");
+      const sql = normalizeToText(item.sql).replace(/\s+/g, " ").trim();
+      const sqlBrief = sql
+        .replace(/^select\s+/i, "")
+        .replace(/\s+from\s+[\s\S]*$/i, "")
+        .slice(0, 40);
+      const main =
+        metricLabel ||
+        sqlBrief ||
+        `查询 ${idx + 1}`;
+      const prefix = idx === queryResults.length - 1 ? "最终查询" : `查询 ${idx + 1}`;
+      return `${prefix}：${main}`;
+    });
+  }, [queryResults]);
   const activeQueryIndex = useMemo(() => {
     if (!queryResults.length) return -1;
     if (selectedQueryIndex < 0 || selectedQueryIndex >= queryResults.length) {
@@ -443,7 +461,7 @@ export default function ChatExecutionPanel({
                       >
                         {queryResults.map((item, idx) => (
                           <option key={item.key} value={idx}>
-                            {`查询 ${idx + 1}${idx === queryResults.length - 1 ? "（最终）" : ""}`}
+                            {queryDisplayLabels[idx]}
                           </option>
                         ))}
                       </select>

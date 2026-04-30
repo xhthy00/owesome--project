@@ -1,10 +1,11 @@
 import { Card, Tabs, Typography } from "antd";
+import Link from "next/link";
 
 const items = [
-  { key: "app", label: "App", children: "Construct App placeholder" },
-  { key: "flow", label: "Flow", children: "Construct Flow placeholder" },
-  { key: "knowledge", label: "Knowledge", children: "Construct Knowledge placeholder" },
-  { key: "prompt", label: "Prompt", children: "Construct Prompt placeholder" }
+  { key: "app", label: "App", children: <Link href="/construct/app">进入应用管理</Link> },
+  { key: "database", label: "Datasource", children: <Link href="/construct/database">进入数据源管理</Link> },
+  { key: "permission", label: "Permission", children: <Link href="/construct/permission">进入权限管理</Link> },
+  { key: "knowledge", label: "Knowledge", children: <Link href="/construct/knowledge">进入知识库管理</Link> }
 ];
 
 export default function ConstructPage() {

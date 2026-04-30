@@ -263,7 +263,7 @@ export default function ConstructDatabasePage() {
           </>
         )}
         width={640}
-        destroyOnClose
+        destroyOnHidden
         forceRender
       >
         <Form
