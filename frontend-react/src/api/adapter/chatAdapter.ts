@@ -31,6 +31,31 @@ export type ConversationRecord = {
     content?: string;
     elapsed_ms?: number;
     sub_task_index?: number;
+    data?: {
+      output_type?: string;
+      html?: string;
+      title?: string;
+      mode?: string;
+      sql?: string;
+      columns?: unknown[];
+      rows?: unknown[][];
+      row_count?: number;
+      chunks?: Array<{
+        output_type?: string;
+        content?: string;
+        title?: string;
+      }>;
+    };
+  }>;
+  sql?: string;
+  exec_result?: { columns?: string[]; rows?: unknown[][]; row_count?: number } | null;
+  chart_type?: string;
+  chart_config?: { x?: string; y?: string[]; title?: string };
+  reports?: Array<{
+    title?: string;
+    html?: string;
+    mode?: string;
+    sub_task_index?: number;
   }>;
   plan_states?: Array<{
     index: number;
@@ -80,6 +105,7 @@ type StreamHandlers = {
     tool: string;
     success: boolean;
     content?: string;
+    data?: Record<string, unknown>;
     round?: number;
     sub_task_index?: number;
     elapsed_ms?: number;
@@ -166,6 +192,7 @@ export async function sendMessageStream(
             tool: (data.tool as string) ?? "tool",
             success: Boolean(data.success),
             content: (data.content as string) ?? "",
+            data: (data.data as Record<string, unknown>) ?? undefined,
             round: typeof data.round === "number" ? (data.round as number) : undefined,
             sub_task_index: typeof data.sub_task_index === "number" ? (data.sub_task_index as number) : undefined,
             elapsed_ms: typeof data.elapsed_ms === "number" ? (data.elapsed_ms as number) : undefined

@@ -5,6 +5,7 @@ export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  runId?: string;
 };
 
 export type ExecutionStep = {
@@ -12,11 +13,27 @@ export type ExecutionStep = {
   title: string;
   detail?: string;
   status: "running" | "done" | "error";
+  runId?: string;
   section?: "plan" | "step" | "result";
   subTaskIndex?: number;
   round?: number;
   progressPct?: number;
   rowCount?: number;
+};
+
+export type ReportPayload = {
+  title: string;
+  html: string;
+  mode?: string;
+  subTaskIndex?: number;
+};
+
+export type QueryResult = {
+  key: string;
+  sql: string;
+  columns: string[];
+  rows: unknown[][];
+  rowCount: number;
 };
 
 type SendOptions = {
@@ -34,10 +51,67 @@ const asText = (value: unknown): string => {
   }
 };
 
+const deriveReportsFromRecord = (record: {
+  reports?: Array<{ title?: string; html?: string; mode?: string; sub_task_index?: number }>;
+  tool_calls?: Array<{
+    sub_task_index?: number;
+    data?: {
+      output_type?: string;
+      html?: string;
+      title?: string;
+      mode?: string;
+      chunks?: Array<{ output_type?: string; content?: string; title?: string }>;
+    };
+  }>;
+}): ReportPayload[] => {
+  const reports: ReportPayload[] = [];
+  if (Array.isArray(record.reports)) {
+    record.reports.forEach((r) => {
+      const html = asText(r?.html).trim();
+      if (!html) return;
+      reports.push({
+        title: asText(r?.title) || "Report",
+        html,
+        mode: r?.mode ? asText(r.mode) : undefined,
+        subTaskIndex: r?.sub_task_index
+      });
+    });
+  }
+  if (reports.length) return reports;
+  if (!Array.isArray(record.tool_calls)) return reports;
+  record.tool_calls.forEach((call) => {
+    const data = call?.data;
+    if (!data) return;
+    if (data.output_type === "html" && asText(data.html).trim()) {
+      reports.push({
+        title: asText(data.title) || "Report",
+        html: asText(data.html),
+        mode: data.mode ? asText(data.mode) : undefined,
+        subTaskIndex: call.sub_task_index
+      });
+      return;
+    }
+    if (!Array.isArray(data.chunks)) return;
+    data.chunks.forEach((chunk) => {
+      if (chunk?.output_type !== "html") return;
+      if (!asText(chunk.content).trim()) return;
+      reports.push({
+        title: asText(chunk.title) || "Report",
+        html: asText(chunk.content),
+        mode: data.mode ? asText(data.mode) : undefined,
+        subTaskIndex: call.sub_task_index
+      });
+    });
+  });
+  return reports;
+};
+
 export function useChat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [executionSteps, setExecutionSteps] = useState<ExecutionStep[]>([]);
   const [summary, setSummary] = useState("");
+  const [reports, setReports] = useState<ReportPayload[]>([]);
+  const [queryResults, setQueryResults] = useState<QueryResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [conversationId, setConversationId] = useState<number | undefined>(undefined);
   const abortRef = useRef<AbortController | null>(null);
@@ -71,26 +145,33 @@ export function useChat() {
       sendingRef.current = true;
       const targetDatasourceId = options?.datasourceId ?? datasourceId;
       stop();
-      const userMsg: Message = { id: crypto.randomUUID(), role: "user", content: asText(input) };
+      const runId = crypto.randomUUID();
+      const userMsg: Message = { id: crypto.randomUUID(), role: "user", content: asText(input), runId };
       const assistantId = crypto.randomUUID();
-      setMessages((prev) => [...prev, userMsg, { id: assistantId, role: "assistant", content: "" }]);
+      setMessages((prev) => [...prev, userMsg, { id: assistantId, role: "assistant", content: "", runId }]);
       setLoading(true);
 
       const controller = new AbortController();
       abortRef.current = controller;
-      setExecutionSteps([
+      const bootstrapId = `plan-bootstrap-${runId}`;
+      setExecutionSteps((prev) => [
+        ...prev,
         {
-          id: "plan-bootstrap",
+          id: bootstrapId,
           title: "准备执行计划",
           detail: "正在初始化 Planner...",
           status: "running",
+          runId,
           section: "plan"
         }
       ]);
       setSummary("");
+      setReports([]);
+      setQueryResults([]);
 
       let latest = "";
-      const stripBootstrap = (prev: ExecutionStep[]) => prev.filter((s) => s.id !== "plan-bootstrap");
+      let latestSql = "";
+      const stripBootstrap = (prev: ExecutionStep[]) => prev.filter((s) => s.id !== bootstrapId);
       const writeAssistant = (content: string) => {
         latest = content;
         setMessages((prev) => prev.map((msg) => (msg.id === assistantId ? { ...msg, content } : msg)));
@@ -119,10 +200,11 @@ export function useChat() {
               setExecutionSteps((prev) => [
                 ...stripBootstrap(prev),
                 ...plans.map((p, idx) => ({
-                  id: `plan-${idx}`,
+                  id: `plan-${runId}-${idx}`,
                   title: `计划 ${idx + 1}: ${p}`,
                   detail: sub_task_agents?.[idx] ? `执行角色: ${sub_task_agents[idx]}` : "",
                   status: "running" as const,
+                  runId,
                   section: "plan" as const,
                   subTaskIndex: idx,
                   progressPct: 0
@@ -138,7 +220,7 @@ export function useChat() {
                 payload.state === "ok" ? "done" : payload.state === "error" ? "error" : "running";
               setExecutionSteps((prev) => {
                 const base = stripBootstrap(prev);
-                const planId = `plan-${payload.index}`;
+                const planId = `plan-${runId}-${payload.index}`;
                 const found = base.some((step) => step.id === planId);
                 const nextDetail =
                   payload.state === "error"
@@ -156,6 +238,7 @@ export function useChat() {
                       title: `计划 ${payload.index + 1}: ${payload.sub_task || `子任务 ${payload.index + 1}`}`,
                       detail: nextDetail,
                       status: nextStatus,
+                      runId,
                       section: "plan",
                       subTaskIndex: payload.index,
                       progressPct: payload.state === "ok" ? 100 : payload.state === "error" ? 0 : 0,
@@ -191,6 +274,7 @@ export function useChat() {
                   title: asText(step.label),
                   detail: asText(step.detail),
                   status: step.status === "error" ? "error" : "done",
+                  runId,
                   section: "step"
                 }
               ]);
@@ -204,6 +288,7 @@ export function useChat() {
                   title: `${asText(agent)}: ${asText(status)}`,
                   detail: asText(error),
                   status: status === "error" ? "error" : status === "start" ? "running" : "done",
+                  runId,
                   section: "step"
                 }
               ]);
@@ -217,11 +302,21 @@ export function useChat() {
                   title: "图表推荐",
                   detail: `推荐图表类型: ${chart_type}`,
                   status: "done",
+                  runId,
                   section: "result"
                 }
               ]);
             },
-            onReport: ({ title, mode, sub_task_index }) => {
+            onReport: ({ title, html, mode, sub_task_index }) => {
+              setReports((prev) => [
+                ...prev,
+                {
+                  title: asText(title) || "Report",
+                  html: asText(html),
+                  mode: mode ? asText(mode) : undefined,
+                  subTaskIndex: sub_task_index
+                }
+              ]);
               setExecutionSteps((prev) => [
                 ...stripBootstrap(prev),
                 {
@@ -229,6 +324,7 @@ export function useChat() {
                   title: "生成报告",
                   detail: `${asText(title) || "Report"}${mode ? ` (${asText(mode)})` : ""}`,
                   status: "done",
+                  runId,
                   section: "result",
                   subTaskIndex: sub_task_index
                 }
@@ -244,6 +340,7 @@ export function useChat() {
                   title: "Agent 思考",
                   detail: safeText,
                   status: "running",
+                  runId,
                   section: "step",
                   subTaskIndex: sub_task_index
                 }
@@ -253,19 +350,37 @@ export function useChat() {
               setExecutionSteps((prev) => [
                 ...stripBootstrap(prev),
                 {
-                  id: `tool-${sub_task_index ?? -1}-${round ?? prev.length}-${tool}`,
+                  id: `tool-${runId}-${sub_task_index ?? -1}-${round ?? prev.length}-${tool}`,
                   title: `调用工具: ${asText(tool)}`,
                   detail: asText(args),
                   status: "running",
+                  runId,
                   section: "step",
                   subTaskIndex: sub_task_index,
                   round
                 }
               ]);
             },
-            onToolResult: ({ tool, success, content, round, sub_task_index, elapsed_ms }) => {
+            onToolResult: ({ tool, success, content, data, round, sub_task_index, elapsed_ms }) => {
               const safeTool = asText(tool);
-              const id = `tool-${sub_task_index ?? -1}-${round ?? -1}-${safeTool}`;
+              if (safeTool === "execute_sql" && data && typeof data === "object") {
+                const rawColumns = Array.isArray(data.columns) ? data.columns : [];
+                const rawRows = Array.isArray(data.rows) ? data.rows : [];
+                const safeColumns = rawColumns.map((col) => asText(col));
+                if (safeColumns.length && rawRows.length) {
+                  setQueryResults((prev) => [
+                    ...prev,
+                    {
+                      key: crypto.randomUUID(),
+                      sql: asText(data.sql) || latestSql,
+                      columns: safeColumns,
+                      rows: rawRows,
+                      rowCount: typeof data.row_count === "number" ? data.row_count : rawRows.length
+                    }
+                  ]);
+                }
+              }
+              const id = `tool-${runId}-${sub_task_index ?? -1}-${round ?? -1}-${safeTool}`;
               setExecutionSteps((prev) => {
                 const base = stripBootstrap(prev);
                 const found = base.some((step) => step.id === id);
@@ -277,6 +392,7 @@ export function useChat() {
                           title: `工具结果: ${safeTool}`,
                           detail: `${asText(content)}${elapsed_ms ? `\n耗时: ${elapsed_ms}ms` : ""}`.trim(),
                           status: success ? "done" : "error",
+                          runId,
                           section: "result"
                         }
                       : step
@@ -289,6 +405,7 @@ export function useChat() {
                     title: `工具结果: ${safeTool}`,
                     detail: `${asText(content)}${elapsed_ms ? `\n耗时: ${elapsed_ms}ms` : ""}`.trim(),
                     status: success ? "done" : "error",
+                    runId,
                     section: "result",
                     subTaskIndex: sub_task_index,
                     round
@@ -298,18 +415,33 @@ export function useChat() {
             },
             onSql: (sql, chartType) => {
               const safeSql = asText(sql);
+              latestSql = safeSql;
               if (safeSql.trim()) appendAssistant(`SQL（${asText(chartType)}）：\n${safeSql}`);
               setExecutionSteps((prev) => [
                 ...stripBootstrap(prev),
-                { id: crypto.randomUUID(), title: "生成 SQL", detail: safeSql, status: "done", section: "result" }
+                { id: crypto.randomUUID(), title: "生成 SQL", detail: safeSql, status: "done", runId, section: "result" }
               ]);
             },
             onResult: (result) => {
               const rowCount = result?.row_count ?? 0;
+              const safeColumns = Array.isArray(result?.columns) ? result.columns.map((col) => asText(col)) : [];
+              const safeRows = Array.isArray(result?.rows) ? result.rows : [];
+              if (safeColumns.length && safeRows.length) {
+                setQueryResults((prev) => [
+                  ...prev,
+                  {
+                    key: crypto.randomUUID(),
+                    sql: latestSql,
+                    columns: safeColumns,
+                    rows: safeRows,
+                    rowCount
+                  }
+                ]);
+              }
               appendAssistant(`执行完成，返回 ${rowCount} 行结果。`);
               setExecutionSteps((prev) => [
                 ...stripBootstrap(prev),
-                { id: crypto.randomUUID(), title: "执行 SQL", detail: `返回 ${rowCount} 行`, status: "done", section: "result" }
+                { id: crypto.randomUUID(), title: "执行 SQL", detail: `返回 ${rowCount} 行`, status: "done", runId, section: "result" }
               ]);
             },
             onFinalAnswer: (content) => {
@@ -329,7 +461,7 @@ export function useChat() {
               setExecutionSteps((prev) => [
                 ...stripBootstrap(prev).map((step) =>
                   step.section === "plan" && step.status === "running"
-                    ? { ...step, status: "error", detail: safeMsg || step.detail }
+                    ? { ...step, status: "error" as const, detail: safeMsg || step.detail }
                     : step
                 ),
                 {
@@ -337,6 +469,7 @@ export function useChat() {
                   title: "工具调用失败",
                   detail: safeMsg,
                   status: "error",
+                  runId,
                   section: "step"
                 }
               ]);
@@ -368,17 +501,39 @@ export function useChat() {
     const nextMessages: Message[] = [];
     const nextSteps: ExecutionStep[] = [];
     let nextSummary = "";
+    const nextReports: ReportPayload[] = [];
+    const nextQueryResults: QueryResult[] = [];
+    const queryResultSignatures = new Set<string>();
 
     detail.records?.forEach((record) => {
       if (asText(record.question).trim()) {
-        nextMessages.push({ id: `u-${record.id}`, role: "user", content: asText(record.question) });
+        nextMessages.push({ id: `u-${record.id}`, role: "user", content: asText(record.question), runId: `record-${record.id}` });
       }
       const answer = asText(record.summary || record.reasoning || "").trim();
       if (answer) {
-        nextMessages.push({ id: `a-${record.id}`, role: "assistant", content: answer });
+        nextMessages.push({ id: `a-${record.id}`, role: "assistant", content: answer, runId: `record-${record.id}` });
       }
       if (asText(record.summary).trim()) {
         nextSummary = asText(record.summary);
+      }
+      nextReports.push(...deriveReportsFromRecord(record));
+      const sqlText = asText(record.sql);
+      const execColumns = Array.isArray(record.exec_result?.columns)
+        ? record.exec_result.columns.map((col) => asText(col))
+        : [];
+      const execRows = Array.isArray(record.exec_result?.rows) ? record.exec_result.rows : [];
+      if (sqlText && execColumns.length && execRows.length) {
+        const signature = `${sqlText}|${execColumns.join(",")}|${record.exec_result?.row_count ?? execRows.length}`;
+        if (!queryResultSignatures.has(signature)) {
+          queryResultSignatures.add(signature);
+          nextQueryResults.push({
+            key: `record-${record.id}-exec`,
+            sql: sqlText,
+            columns: execColumns,
+            rows: execRows,
+            rowCount: record.exec_result?.row_count ?? execRows.length
+          });
+        }
       }
 
       if (record.plans?.length) {
@@ -389,6 +544,7 @@ export function useChat() {
             title: `计划 ${idx + 1}: ${p}`,
             detail: ps?.sub_task_agent ? `执行角色: ${asText(ps.sub_task_agent)}` : "",
             status: ps?.state === "ok" ? "done" : ps?.state === "error" ? "error" : "running",
+            runId: `record-${record.id}`,
             section: "plan",
             subTaskIndex: idx,
             progressPct: ps?.state === "ok" ? 100 : 0,
@@ -403,10 +559,31 @@ export function useChat() {
           title: `工具结果: ${asText(tc.tool) || "tool"}`,
           detail: `${asText(tc.content)}${tc.elapsed_ms ? `\n耗时: ${tc.elapsed_ms}ms` : ""}`.trim(),
           status: tc.success === false ? "error" : "done",
+          runId: `record-${record.id}`,
           section: "result",
           subTaskIndex: tc.sub_task_index,
           round: tc.round
         });
+        if (asText(tc.tool) === "execute_sql" && tc.data && typeof tc.data === "object") {
+          const rawColumns = Array.isArray(tc.data.columns) ? tc.data.columns : [];
+          const rawRows = Array.isArray(tc.data.rows) ? tc.data.rows : [];
+          const safeColumns = rawColumns.map((col) => asText(col));
+          if (safeColumns.length && rawRows.length) {
+            const sql = asText(tc.data.sql);
+            const rowCount = typeof tc.data.row_count === "number" ? tc.data.row_count : rawRows.length;
+            const signature = `${sql}|${safeColumns.join(",")}|${rowCount}`;
+            if (!queryResultSignatures.has(signature)) {
+              queryResultSignatures.add(signature);
+              nextQueryResults.push({
+                key: `record-${record.id}-tool-${idx}`,
+                sql,
+                columns: safeColumns,
+                rows: rawRows,
+                rowCount
+              });
+            }
+          }
+        }
       });
 
       record.steps?.forEach((st, idx) => {
@@ -415,6 +592,7 @@ export function useChat() {
           title: asText(st.label || st.name || "步骤"),
           detail: asText(st.detail),
           status: st.status === "error" ? "error" : "done",
+          runId: `record-${record.id}`,
           section: "step",
           subTaskIndex: st.sub_task_index
         });
@@ -424,6 +602,8 @@ export function useChat() {
     setMessages(nextMessages);
     setExecutionSteps(nextSteps);
     setSummary(nextSummary);
+    setReports(nextReports);
+    setQueryResults(nextQueryResults);
     setLoading(false);
   }, []);
 
@@ -432,8 +612,21 @@ export function useChat() {
     setMessages([]);
     setExecutionSteps([]);
     setSummary("");
+    setReports([]);
+    setQueryResults([]);
     setLoading(false);
   }, []);
 
-  return { messages, executionSteps, summary, loading, send, stop, loadConversation, clearConversation };
+  return {
+    messages,
+    executionSteps,
+    summary,
+    reports,
+    queryResults,
+    loading,
+    send,
+    stop,
+    loadConversation,
+    clearConversation
+  };
 }

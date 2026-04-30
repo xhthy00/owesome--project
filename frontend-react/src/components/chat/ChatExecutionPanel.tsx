@@ -1,13 +1,31 @@
-import { DesktopOutlined, DownOutlined, FileTextOutlined } from "@ant-design/icons";
+import {
+  BarChartOutlined,
+  CodeOutlined,
+  CopyOutlined,
+  DesktopOutlined,
+  DownloadOutlined,
+  DownOutlined,
+  EyeInvisibleOutlined,
+  EyeOutlined,
+  ExpandOutlined,
+  FileTextOutlined,
+  LineChartOutlined,
+  PieChartOutlined,
+  TableOutlined
+} from "@ant-design/icons";
+import { Pagination, message, Modal } from "antd";
 import React from "react";
-import { useMemo, useState } from "react";
-import { ExecutionStep } from "@/hooks/useChat";
+import { useEffect, useMemo, useState } from "react";
+import { ExecutionStep, QueryResult, ReportPayload } from "@/hooks/useChat";
+import G2Chart, { G2ChartType } from "@/components/chat/G2Chart";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 type Props = {
   steps: ExecutionStep[];
   summary?: string;
+  reports?: ReportPayload[];
+  queryResults?: QueryResult[];
   selectedStepId?: string;
   onSelectStep?: (stepId: string) => void;
 };
@@ -53,12 +71,33 @@ function parseThinkContent(raw: unknown) {
   return { thinkBlocks, plain };
 }
 
-export default function ChatExecutionPanel({ steps, summary, selectedStepId, onSelectStep }: Props) {
+export default function ChatExecutionPanel({
+  steps,
+  summary,
+  reports = [],
+  queryResults = [],
+  selectedStepId,
+  onSelectStep
+}: Props) {
   const [activeTab, setActiveTab] = useState<"steps" | "summary">("steps");
   const [summaryThinkExpanded, setSummaryThinkExpanded] = useState(false);
   const [summaryConclusionExpanded, setSummaryConclusionExpanded] = useState(true);
   const [stepDetailExpanded, setStepDetailExpanded] = useState(true);
+  const [showReportDialog, setShowReportDialog] = useState(false);
+  const [resultTab, setResultTab] = useState<"chart" | "data" | "sql">("chart");
+  const [chartType, setChartType] = useState<G2ChartType>("column");
+  const [selectedQueryIndex, setSelectedQueryIndex] = useState(-1);
+  const [showChartLabel, setShowChartLabel] = useState(false);
+  const [dataPage, setDataPage] = useState(1);
+  const pageSize = 20;
   const flowAgents = ["Planner", "DataAnalyst", "Charter", "Summarizer"] as const;
+  const flowAgentLabelMap: Record<(typeof flowAgents)[number], string> = {
+    Planner: "规划",
+    DataAnalyst: "分析",
+    Charter: "制图",
+    Summarizer: "总结"
+  };
+  const latestReport = reports.length ? reports[reports.length - 1] : undefined;
 
   const selectedStep = useMemo(
     () => steps.find((s) => s.id === selectedStepId) ?? steps[steps.length - 1],
@@ -82,12 +121,61 @@ export default function ChatExecutionPanel({ steps, summary, selectedStepId, onS
     const normalized = normalizeToText(markdownDetailText);
     return typeof normalized === "string" ? normalized : String(normalized ?? "");
   }, [markdownDetailText]);
+  const summaryMarkdownText = useMemo(
+    () => normalizeToText(parsedSummary.plain || ""),
+    [parsedSummary.plain]
+  );
+  const safeSummaryMarkdownText = useMemo(() => {
+    const normalized = normalizeToText(summaryMarkdownText);
+    return typeof normalized === "string" ? normalized : String(normalized ?? "");
+  }, [summaryMarkdownText]);
   const markdownPlugins = useMemo(() => [remarkGfm], []);
+  const safeReportHtml = useMemo(() => normalizeToText(latestReport?.html || ""), [latestReport?.html]);
+  const safeReportTitle = useMemo(() => normalizeToText(latestReport?.title || "Report"), [latestReport?.title]);
+  const activeQuery = useMemo(() => {
+    if (!queryResults.length) return undefined;
+    if (selectedQueryIndex < 0 || selectedQueryIndex >= queryResults.length) {
+      return queryResults[queryResults.length - 1];
+    }
+    return queryResults[selectedQueryIndex];
+  }, [queryResults, selectedQueryIndex]);
+  const activeQueryIndex = useMemo(() => {
+    if (!queryResults.length) return -1;
+    if (selectedQueryIndex < 0 || selectedQueryIndex >= queryResults.length) {
+      return queryResults.length - 1;
+    }
+    return selectedQueryIndex;
+  }, [queryResults, selectedQueryIndex]);
+  const pagedRows = useMemo(() => {
+    if (!activeQuery) return [];
+    const start = (dataPage - 1) * pageSize;
+    return activeQuery.rows.slice(start, start + pageSize);
+  }, [activeQuery, dataPage]);
+  useEffect(() => {
+    setDataPage(1);
+  }, [activeQueryIndex]);
   const isToolResultStep = selectedStepTitleText.startsWith("工具结果:");
   const isStepError =
     selectedStepStatusText === "error" ||
     /execute failed|failed|error|异常|失败/i.test(detailText);
   const stepTitle = (selectedStepTitleText || "选择一个步骤查看详情").replace(/^工具结果:\s*/, "");
+  const copyReportHtml = async () => {
+    try {
+      await navigator.clipboard.writeText(safeReportHtml);
+      message.success("HTML 已复制");
+    } catch {
+      message.error("复制失败");
+    }
+  };
+  const downloadReportHtml = () => {
+    const blob = new Blob([safeReportHtml], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${safeReportTitle || "report"}.html`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
   const flowStatus = useMemo(() => {
     const statusMap: Record<string, "idle" | "running" | "done" | "error"> = {};
     flowAgents.forEach((agent) => {
@@ -104,6 +192,14 @@ export default function ChatExecutionPanel({ steps, summary, selectedStepId, onS
         if (statusMap[agent] !== "error") statusMap[agent] = "done";
       }
     });
+    // 历史会话通常不会保留 start/end 事件；若无 running 且存在执行记录，则将 idle 兜底为 done。
+    const hasSteps = steps.length > 0;
+    const hasRunning = steps.some((step) => step.status === "running");
+    if (hasSteps && !hasRunning) {
+      flowAgents.forEach((agent) => {
+        if (statusMap[agent] === "idle") statusMap[agent] = "done";
+      });
+    }
     return statusMap;
   }, [steps]);
 
@@ -159,7 +255,7 @@ export default function ChatExecutionPanel({ steps, summary, selectedStepId, onS
             return (
               <div key={agent} className="flex shrink-0 items-center gap-2">
                 <span className={`h-2 w-2 rounded-full ${color}`} />
-                <span className="text-[11px] text-[#64748b] dark:text-[#94a3b8]">{agent}</span>
+                <span className="text-[11px] text-[#64748b] dark:text-[#94a3b8]">{flowAgentLabelMap[agent]}</span>
                 {idx < flowAgents.length - 1 ? <span className="text-[#cbd5e1]">→</span> : null}
               </div>
             );
@@ -214,14 +310,14 @@ export default function ChatExecutionPanel({ steps, summary, selectedStepId, onS
                   <div
                     className={`rounded-md border px-3 py-2 ${
                       isToolResultStep
-                        ? "min-w-0 w-full max-w-full flex-none border-[#1f314f] bg-gray-900 px-4 py-3 overflow-x-auto overflow-y-hidden"
+                        ? "min-w-0 w-full max-w-full flex-none border-[#bfdbfe] bg-[#eff6ff] px-4 py-3 overflow-x-auto overflow-y-hidden"
                         : "border-[#dbeafe] bg-[#eff6ff] dark:border-[#1d4ed8] dark:bg-[#172554]"
                     }`}
                   >
                     {isToolResultStep ? (
                       <div
-                        className={`prose prose-invert max-w-none w-full max-w-full overflow-x-auto leading-relaxed [&_p]:text-inherit [&_li]:text-inherit [&_strong]:text-inherit [&_strong]:font-bold [&_b]:text-inherit [&_b]:font-bold [&_h1]:text-inherit [&_h1]:text-2xl [&_h1]:leading-9 [&_h1]:font-bold [&_h2]:text-inherit [&_h2]:text-xl [&_h2]:leading-8 [&_h2]:font-semibold [&_h3]:text-inherit [&_h3]:text-lg [&_h3]:leading-7 [&_h3]:font-semibold [&_h4]:text-inherit [&_h5]:text-inherit [&_h6]:text-inherit [&_code]:bg-transparent [&_code]:px-0 [&_code]:font-mono [&_pre]:bg-transparent [&_pre]:p-0 [&_table]:w-max [&_table]:min-w-full [&_table]:border-collapse [&_table]:border [&_table]:border-[#2b425f] [&_th]:border [&_th]:border-[#2b425f] [&_th]:px-2 [&_th]:py-1 [&_th]:font-semibold [&_td]:border [&_td]:border-[#2b425f] [&_td]:px-2 [&_td]:py-1 ${
-                          isStepError ? "text-[#fca5a5]" : "text-green-400"
+                        className={`prose max-w-none w-full max-w-full overflow-x-auto leading-relaxed [&_p]:text-inherit [&_li]:text-inherit [&_strong]:text-inherit [&_strong]:font-bold [&_b]:text-inherit [&_b]:font-bold [&_h1]:text-inherit [&_h1]:text-2xl [&_h1]:leading-9 [&_h1]:font-bold [&_h2]:text-inherit [&_h2]:text-xl [&_h2]:leading-8 [&_h2]:font-semibold [&_h3]:text-inherit [&_h3]:text-lg [&_h3]:leading-7 [&_h3]:font-semibold [&_h4]:text-inherit [&_h5]:text-inherit [&_h6]:text-inherit [&_code]:bg-transparent [&_code]:px-0 [&_code]:font-mono [&_pre]:bg-transparent [&_pre]:p-0 [&_table]:w-max [&_table]:min-w-full [&_table]:border-collapse [&_table]:border [&_table]:border-[#93c5fd] [&_th]:border [&_th]:border-[#93c5fd] [&_th]:px-2 [&_th]:py-1 [&_th]:font-semibold [&_td]:border [&_td]:border-[#93c5fd] [&_td]:px-2 [&_td]:py-1 ${
+                          isStepError ? "text-[#b91c1c]" : "text-[#111827]"
                         }`}
                       >
                         <ReactMarkdown remarkPlugins={markdownPlugins}>{safeMarkdownText}</ReactMarkdown>
@@ -237,7 +333,7 @@ export default function ChatExecutionPanel({ steps, summary, selectedStepId, onS
             </div>
           </div>
         ) : activeTab === "summary" ? (
-          summary ? (
+          summary || reports.length || queryResults.length ? (
             <div className="space-y-3">
               {parsedSummary.thinkBlocks.length ? (
                 <div className="rounded-xl border border-[#e6eefc] bg-white p-4 dark:border-[#2f3441] dark:bg-[#11131a]">
@@ -287,12 +383,195 @@ export default function ChatExecutionPanel({ steps, summary, selectedStepId, onS
                   </button>
                   {summaryConclusionExpanded ? (
                     <div className="mt-2 rounded-md border border-[#dbeafe] bg-[#eff6ff] p-3 text-sm leading-7 text-[#1e3a8a] dark:border-[#1d4ed8] dark:bg-[#172554] dark:text-[#bfdbfe]">
-                      {parsedSummary.plain}
+                      <div className="prose max-w-none overflow-x-auto text-[#1e3a8a] dark:prose-invert dark:text-[#bfdbfe] [&_p]:text-inherit [&_li]:text-inherit [&_strong]:text-inherit [&_strong]:font-bold [&_b]:text-inherit [&_b]:font-bold [&_h1]:text-inherit [&_h1]:text-2xl [&_h1]:leading-9 [&_h1]:font-bold [&_h2]:text-inherit [&_h2]:text-xl [&_h2]:leading-8 [&_h2]:font-semibold [&_h3]:text-inherit [&_h3]:text-lg [&_h3]:leading-7 [&_h3]:font-semibold [&_h4]:text-inherit [&_h5]:text-inherit [&_h6]:text-inherit [&_code]:bg-transparent [&_code]:px-0 [&_code]:font-mono [&_pre]:bg-transparent [&_pre]:p-0 [&_table]:w-max [&_table]:min-w-full [&_table]:border-collapse [&_table]:border [&_table]:border-[#93c5fd] dark:[&_table]:border-[#2b425f] [&_th]:border [&_th]:border-[#93c5fd] dark:[&_th]:border-[#2b425f] [&_th]:px-2 [&_th]:py-1 [&_th]:font-semibold [&_td]:border [&_td]:border-[#93c5fd] dark:[&_td]:border-[#2b425f] [&_td]:px-2 [&_td]:py-1">
+                        <ReactMarkdown remarkPlugins={markdownPlugins}>{safeSummaryMarkdownText}</ReactMarkdown>
+                      </div>
                     </div>
                   ) : null}
                 </div>
               ) : null}
-              {!parsedSummary.thinkBlocks.length && !parsedSummary.plain ? (
+              {latestReport?.html ? (
+                <div className="rounded-xl border border-[#e6eefc] bg-white p-4 dark:border-[#2f3441] dark:bg-[#11131a]">
+                  <div className="overflow-hidden rounded-lg border border-[#dbe5f1] bg-white dark:border-[#2f3441] dark:bg-[#11131a]">
+                    <div className="flex h-9 items-center justify-between gap-2 border-b border-[#dbe5f1] bg-[#f8fafc] px-3 dark:border-[#2f3441] dark:bg-[#141923]">
+                      <span className="truncate text-xs font-semibold text-[#344054] dark:text-[#e2e8f0]">
+                        {safeReportTitle}
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={copyReportHtml}
+                          className="inline-flex h-6 items-center gap-1 rounded-md border border-[#d9e2ef] bg-white px-2 text-[11px] text-[#475467] transition-colors hover:border-[#c5d4e8] dark:border-[#334155] dark:bg-[#0f172a] dark:text-[#cbd5e1]"
+                        >
+                          <CopyOutlined />
+                          <span>复制HTML</span>
+                        </button>
+                        <button
+                          onClick={downloadReportHtml}
+                          className="inline-flex h-6 items-center gap-1 rounded-md border border-[#d9e2ef] bg-white px-2 text-[11px] text-[#475467] transition-colors hover:border-[#c5d4e8] dark:border-[#334155] dark:bg-[#0f172a] dark:text-[#cbd5e1]"
+                        >
+                          <DownloadOutlined />
+                          <span>下载</span>
+                        </button>
+                        <button
+                          onClick={() => setShowReportDialog(true)}
+                          className="inline-flex h-6 items-center gap-1 rounded-md border border-[#d9e2ef] bg-white px-2 text-[11px] text-[#3b82f6] transition-colors hover:border-[#93c5fd] dark:border-[#334155] dark:bg-[#0f172a]"
+                        >
+                          <ExpandOutlined />
+                          <span>展开</span>
+                        </button>
+                      </div>
+                    </div>
+                    <iframe
+                      title={safeReportTitle}
+                      className="h-[360px] w-full border-0"
+                      srcDoc={safeReportHtml}
+                      sandbox="allow-scripts"
+                      referrerPolicy="no-referrer"
+                    />
+                  </div>
+                </div>
+              ) : null}
+              {activeQuery ? (
+                <div className="rounded-xl border border-[#d9e2ef] bg-white p-4 dark:border-[#2f3441] dark:bg-[#11131a]">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#d9e2ef] bg-[#f8fafc] p-2 dark:border-[#334155] dark:bg-[#141923]">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] text-[#98a2b3]">查询集</span>
+                      <select
+                        value={activeQueryIndex}
+                        onChange={(e) => setSelectedQueryIndex(Number(e.target.value))}
+                        className="rounded-md border border-[#d9e2ef] bg-white px-2 py-1 text-xs text-[#475467] dark:border-[#334155] dark:bg-[#0f172a] dark:text-[#cbd5e1]"
+                      >
+                        {queryResults.map((item, idx) => (
+                          <option key={item.key} value={idx}>
+                            {`查询 ${idx + 1}${idx === queryResults.length - 1 ? "（最终）" : ""}`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => setResultTab("chart")}
+                        className={`rounded px-2 py-1 text-[11px] ${resultTab === "chart" ? "bg-[#dbeafe] text-[#1d4ed8]" : "text-[#667085]"}`}
+                      >
+                        图表
+                      </button>
+                      <button
+                        onClick={() => setResultTab("data")}
+                        className={`rounded px-2 py-1 text-[11px] ${resultTab === "data" ? "bg-[#dbeafe] text-[#1d4ed8]" : "text-[#667085]"}`}
+                      >
+                        数据
+                      </button>
+                      <button
+                        onClick={() => setResultTab("sql")}
+                        className={`rounded px-2 py-1 text-[11px] ${resultTab === "sql" ? "bg-[#dbeafe] text-[#1d4ed8]" : "text-[#667085]"}`}
+                      >
+                        SQL
+                      </button>
+                    </div>
+                  </div>
+
+                  {resultTab === "chart" ? (
+                    <div className="rounded-md border border-[#e5e7eb] p-3 dark:border-[#2f3441]">
+                      <div className="mb-2 flex items-center justify-between">
+                        <div className="text-xs font-semibold text-[#344054] dark:text-[#cbd5e1]">图表展示</div>
+                        <div className="flex items-center gap-1 rounded-md border border-[#d9e2ef] p-1 dark:border-[#334155]">
+                          <button
+                            onClick={() => setChartType("column")}
+                            className={`rounded p-1 ${chartType === "column" ? "bg-[#dbeafe] text-[#1d4ed8]" : "text-[#667085]"}`}
+                          >
+                            <BarChartOutlined />
+                          </button>
+                          <button
+                            onClick={() => setChartType("bar")}
+                            className={`rounded p-1 ${chartType === "bar" ? "bg-[#dbeafe] text-[#1d4ed8]" : "text-[#667085]"}`}
+                          >
+                            <TableOutlined />
+                          </button>
+                          <button
+                            onClick={() => setChartType("line")}
+                            className={`rounded p-1 ${chartType === "line" ? "bg-[#dbeafe] text-[#1d4ed8]" : "text-[#667085]"}`}
+                          >
+                            <LineChartOutlined />
+                          </button>
+                          <button
+                            onClick={() => setChartType("pie")}
+                            className={`rounded p-1 ${chartType === "pie" ? "bg-[#dbeafe] text-[#1d4ed8]" : "text-[#667085]"}`}
+                          >
+                            <PieChartOutlined />
+                          </button>
+                          <span className="mx-1 h-3 w-px bg-[#d9e2ef] dark:bg-[#334155]" />
+                          <button
+                            onClick={() => setShowChartLabel((prev) => !prev)}
+                            className={`rounded p-1 ${showChartLabel ? "bg-[#dbeafe] text-[#1d4ed8]" : "text-[#667085]"}`}
+                            title={showChartLabel ? "隐藏标签" : "显示标签"}
+                          >
+                            {showChartLabel ? <EyeOutlined /> : <EyeInvisibleOutlined />}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="h-[340px] rounded-md bg-white p-2 dark:bg-[#0f172a]">
+                        <G2Chart
+                          type={chartType}
+                          columns={activeQuery.columns}
+                          rows={activeQuery.rows}
+                          showLabel={showChartLabel}
+                        />
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {resultTab === "data" ? (
+                    <div className="overflow-x-auto rounded-md border border-[#e5e7eb] dark:border-[#2f3441]">
+                      <table className="min-w-full border-collapse text-xs">
+                        <thead className="bg-[#f8fafc] dark:bg-[#141923]">
+                          <tr>
+                            {activeQuery.columns.map((col) => (
+                              <th key={col} className="border border-[#e5e7eb] px-2 py-1 text-left dark:border-[#2f3441]">
+                                {col}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {pagedRows.map((row, idx) => (
+                            <tr key={idx}>
+                              {activeQuery.columns.map((col, colIdx) => (
+                                <td key={`${idx}-${col}`} className="border border-[#e5e7eb] px-2 py-1 dark:border-[#2f3441]">
+                                  {normalizeToText((row as unknown[])[colIdx])}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <div className="flex items-center justify-between gap-2 px-2 py-2">
+                        <span className="text-[11px] text-[#98a2b3]">{`共 ${activeQuery.rowCount} 行`}</span>
+                        <Pagination
+                          size="small"
+                          current={dataPage}
+                          pageSize={pageSize}
+                          total={activeQuery.rowCount}
+                          onChange={setDataPage}
+                          showSizeChanger={false}
+                        />
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {resultTab === "sql" ? (
+                    <div className="rounded-md border border-[#1f314f] bg-gray-900 p-3">
+                      <div className="mb-1 flex items-center gap-2 text-xs text-[#9ca3af]">
+                        <CodeOutlined />
+                        <span>SQL</span>
+                      </div>
+                      <pre className="m-0 whitespace-pre-wrap break-words font-mono text-xs leading-6 text-green-400">
+                        {activeQuery.sql || "--"}
+                      </pre>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              {!parsedSummary.thinkBlocks.length && !parsedSummary.plain && !latestReport?.html && !activeQuery ? (
                 <div className="flex h-full items-center justify-center text-sm">暂无摘要</div>
               ) : null}
             </div>
@@ -328,6 +607,22 @@ export default function ChatExecutionPanel({ steps, summary, selectedStepId, onS
       <div className="h-7 border-t border-[#e5e7eb] px-4 text-[10px] leading-7 text-[#94a3b8] dark:border-[#2f3441]">
         就绪
       </div>
+      <Modal
+        title={safeReportTitle}
+        open={showReportDialog}
+        onCancel={() => setShowReportDialog(false)}
+        footer={null}
+        width="85%"
+        styles={{ body: { padding: 0 } }}
+      >
+        <iframe
+          title={`${safeReportTitle}-full`}
+          className="h-[72vh] w-full border-0"
+          srcDoc={safeReportHtml}
+          sandbox="allow-scripts"
+          referrerPolicy="no-referrer"
+        />
+      </Modal>
     </div>
   );
 }

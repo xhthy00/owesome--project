@@ -12,7 +12,8 @@ const initConversations = [{ id: "default", title: "Default Assistant" }];
 
 export default function ChatPage() {
   const router = useRouter();
-  const { messages, executionSteps, summary, loading, send, stop, loadConversation, clearConversation } = useChat();
+  const { messages, executionSteps, summary, reports, queryResults, loading, send, stop, loadConversation, clearConversation } =
+    useChat();
   const [conversations] = useState(initConversations);
   const [activeId] = useState("default");
   const [temperatureValue, setTemperatureValue] = useState(0.6);
@@ -140,6 +141,8 @@ export default function ChatPage() {
                     <ChatExecutionPanel
                       steps={executionSteps}
                       summary={summary}
+                      reports={reports}
+                      queryResults={queryResults}
                       selectedStepId={selectedStepId}
                       onSelectStep={setSelectedStepId}
                     />
