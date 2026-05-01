@@ -53,6 +53,9 @@ def _ensure_columns() -> None:
             "summary": "TEXT",
             "reports": "TEXT",
         },
+        "ds_permission": {
+            "table_name": "TEXT",
+        },
     }
 
     inspector = inspect(engine)

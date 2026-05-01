@@ -15,11 +15,18 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.chat.api.chat import router as chat_router
+from system.api.system import get_current_user
 
 
 def _build_app() -> FastAPI:
     app = FastAPI()
     app.include_router(chat_router, prefix="/api/v1")
+
+    class _AuthUser:
+        id = 1
+        account = "admin"
+
+    app.dependency_overrides[get_current_user] = lambda: _AuthUser()
     return app
 
 

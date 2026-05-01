@@ -42,6 +42,7 @@ def upgrade() -> None:
         sa.Column("type", sa.String(length=64), nullable=False),
         sa.Column("ds_id", sa.BigInteger(), nullable=True),
         sa.Column("table_id", sa.BigInteger(), nullable=True),
+        sa.Column("table_name", sa.Text(), nullable=True),
         sa.Column("expression_tree", sa.Text(), nullable=True),
         sa.Column("permissions", sa.Text(), nullable=True),
         sa.Column("white_list_user", sa.Text(), nullable=True),

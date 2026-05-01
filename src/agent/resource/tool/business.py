@@ -430,13 +430,16 @@ def find_related_tables(
 
 
 @tool()
-def describe_table(datasource_id: int, table_name: str) -> ToolResult:
+def describe_table(datasource_id: int, table_name: str, user_id: int | None = None) -> ToolResult:
     """返回指定表的列清单（name / type / comment）。
 
     Args:
         table_name: 要查询的表名，支持 ``schema.table`` 形式。
     """
+    from src.common.core.database import get_db_session
     from src.datasource.db.db import get_schema_info
+    from src.datasource.service.query_permission import schema_tables_for_user
+    from src.system.crud.crud_user import get_user_by_id
 
     db_type, config, _ = _load_datasource(datasource_id)
     schema = get_schema_info(db_type, config)
@@ -447,6 +450,12 @@ def describe_table(datasource_id: int, table_name: str) -> ToolResult:
             content=f"表 `{table_name}` 不存在。已知表（前 20）：{available}",
             data=None,
         )
+
+    if user_id is not None:
+        with get_db_session() as session:
+            user = get_user_by_id(session, user_id)
+            filtered = schema_tables_for_user(session, user, datasource_id, [dict(match)])
+            match = filtered[0] if filtered else match
 
     fields = match.get("fields", [])
     header = f"表 `{match['name']}`" + (f"（{match['comment']}）" if match.get("comment") else "")
@@ -467,6 +476,7 @@ def sample_rows(
     table_name: str,
     limit: int = SAMPLE_ROWS_DEFAULT,
     where_clause: str = "",
+    user_id: int | None = None,
 ) -> ToolResult:
     """采样表的若干行（可带 WHERE 过滤），用于理解真实数据样貌、枚举值、业务含义。
 
@@ -481,7 +491,10 @@ def sample_rows(
             仅允许只读表达式；含 INSERT/UPDATE/DELETE/UNION-子 DML 等写操作一律拒绝；
             多条语句（分号）也会拒绝。
     """
+    from src.common.core.database import get_db_session
     from src.datasource.db.db import execute_sql as db_execute_sql
+    from src.datasource.service.query_permission import apply_permissions_for_execute
+    from src.system.crud.crud_user import get_user_by_id
 
     limit = max(1, min(int(limit or SAMPLE_ROWS_DEFAULT), SAMPLE_ROWS_LLM_MAX))
     db_type, config, _ = _load_datasource(datasource_id)
@@ -501,7 +514,15 @@ def sample_rows(
                 data=None,
             )
 
-    success, message, result = db_execute_sql(db_type=db_type, config=config, sql=sql)
+    sql_run = sql
+    if user_id is not None:
+        with get_db_session() as session:
+            u = get_user_by_id(session, user_id)
+            sql_run = apply_permissions_for_execute(
+                session, u, datasource_id, db_type, sql, [table_name.split(".")[-1]]
+            )
+
+    success, message, result = db_execute_sql(db_type=db_type, config=config, sql=sql_run)
     if not success:
         return ToolResult(content=f"采样失败：{message}", data=None)
 
@@ -513,26 +534,34 @@ def sample_rows(
 
 
 @tool()
-def execute_sql(datasource_id: int, sql: str) -> ToolResult:
+def execute_sql(datasource_id: int, sql: str, user_id: int | None = None) -> ToolResult:
     """在当前数据源上执行只读 SQL 并返回结果。
 
     Args:
         sql: 要执行的 SELECT 语句；非只读会被拒绝。
     """
+    from src.common.core.database import get_db_session
     from src.datasource.db.db import execute_sql as db_execute_sql
+    from src.datasource.service.query_permission import apply_permissions_for_execute
+    from src.system.crud.crud_user import get_user_by_id
 
     db_type, config, _ = _load_datasource(datasource_id)
-    success, message, result = db_execute_sql(db_type=db_type, config=config, sql=sql)
+    sql_run = sql
+    if user_id is not None:
+        with get_db_session() as session:
+            u = get_user_by_id(session, user_id)
+            sql_run = apply_permissions_for_execute(session, u, datasource_id, db_type, sql, None)
+    success, message, result = db_execute_sql(db_type=db_type, config=config, sql=sql_run)
     if not success:
         return ToolResult(
             content=f"SQL 执行失败：{message}",
-            data={"sql": sql, "error": message},
+            data={"sql": sql_run, "error": message},
         )
 
     if not isinstance(result, dict) or "rows" not in result:
         return ToolResult(
             content=f"SQL 执行成功，影响 {result.get('row_count', 0) if isinstance(result, dict) else 0} 行。",
-            data={"sql": sql, **(result if isinstance(result, dict) else {})},
+            data={"sql": sql_run, **(result if isinstance(result, dict) else {})},
         )
 
     columns = result.get("columns", [])
@@ -541,7 +570,7 @@ def execute_sql(datasource_id: int, sql: str) -> ToolResult:
     content = f"SQL 执行成功，返回 {len(rows)} 行：\n\n{preview}"
     return ToolResult(
         content=content,
-        data={"sql": sql, "columns": columns, "rows": rows, "row_count": len(rows)},
+        data={"sql": sql_run, "columns": columns, "rows": rows, "row_count": len(rows)},
     )
 
 

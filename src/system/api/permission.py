@@ -1,5 +1,6 @@
 """Permission read APIs for frontend-react permission pages."""
 
+import json
 from datetime import datetime
 from typing import Dict, List
 
@@ -7,10 +8,12 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from common.core.database import get_session
+from common.exceptions.base import ForbiddenException
 from common.schemas.response import success_response
-from datasource.models.datasource import CoreDatasource, CoreTable
+from datasource.models.datasource import CoreDatasource
 from datasource.models.permission import DsPermission
 from system.api.system import get_current_user
+from system.authz import can_manage_data_permissions
 from system.models.user import SysUser
 from system.models.workspace import SysUserWorkspace
 
@@ -99,7 +102,6 @@ def list_data_rules(
     current_user=Depends(get_current_user),
 ):
     _ = current_user
-    table_map = {table.id: table.table_name for table in session.query(CoreTable).all()}
     rules: List[dict] = []
     for item in session.query(DsPermission).order_by(DsPermission.id.desc()).all():
         scope = "row" if item.type == "row" else "column"
@@ -108,7 +110,7 @@ def list_data_rules(
                 "id": int(item.id),
                 "scope": scope,
                 "datasource_id": int(item.ds_id) if item.ds_id else 0,
-                "table_name": table_map.get(item.table_id, f"table_{item.table_id}" if item.table_id else "-"),
+                "table_name": item.table_name or "-",
                 "rule": item.expression_tree or item.permissions or "",
                 "enabled": bool(item.enable),
             }
@@ -122,16 +124,27 @@ def create_data_rule(
     session: Session = Depends(get_session),
     current_user=Depends(get_current_user),
 ):
-    _ = current_user
+    if not can_manage_data_permissions(session, current_user):
+        raise ForbiddenException("仅系统管理员或工作空间管理员可管理数据权限规则")
+    rule = payload.get("rule")
+    if isinstance(rule, (dict, list)):
+        expr = json.dumps(rule, ensure_ascii=False)
+    else:
+        expr = rule
+    perms = payload.get("permissions")
+    if isinstance(perms, (dict, list)):
+        perms_s = json.dumps(perms, ensure_ascii=False)
+    else:
+        perms_s = perms
     item = DsPermission(
         enable=bool(payload.get("enabled", True)),
         auth_target_type=payload.get("auth_target_type", "workspace"),
         auth_target_id=payload.get("auth_target_id"),
         type=payload.get("scope", "row"),
         ds_id=payload.get("datasource_id"),
-        table_id=payload.get("table_id"),
-        expression_tree=payload.get("rule"),
-        permissions=payload.get("permissions"),
+        table_name=(payload.get("table_name") or "").strip() or None,
+        expression_tree=expr,
+        permissions=perms_s,
         white_list_user=payload.get("white_list_user"),
         create_time=datetime.now(),
     )

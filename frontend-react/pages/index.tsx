@@ -1,14 +1,4 @@
-import {
-  AudioOutlined,
-  BarChartOutlined,
-  BellOutlined,
-  DatabaseOutlined,
-  SearchOutlined,
-  FileTextOutlined,
-  FundOutlined,
-  ToolOutlined,
-  UserOutlined
-} from "@ant-design/icons";
+import { AudioOutlined, BarChartOutlined, DatabaseOutlined, SearchOutlined, FileTextOutlined, FundOutlined, ToolOutlined } from "@ant-design/icons";
 import { Card, Input, Popover, Typography } from "antd";
 import Image from "next/image";
 import { useRouter } from "next/router";
@@ -123,16 +113,6 @@ export default function HomePage() {
 
   return (
     <div className="dbgpt-ui-font flex h-full flex-col bg-[#f7f7f9] dark:bg-[#0f1012]">
-      <div className="flex h-16 items-center justify-between border-b border-gray-200 bg-white/80 px-8 text-sm text-[#3a465d] backdrop-blur dark:border-gray-800 dark:bg-[#111217]/80">
-        <span>启明AI分析助手</span>
-        <div className="flex items-center gap-4 text-[#7d8ba2]">
-          <BellOutlined />
-          <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs dark:bg-gray-800">300</span>
-          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-500 text-[10px] text-white">
-            <UserOutlined />
-          </span>
-        </div>
-      </div>
       <div className="flex flex-1 flex-col items-center overflow-auto bg-white px-8 pb-6 pt-6 dark:bg-[#111217]">
         <Typography.Title
           level={1}

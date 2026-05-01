@@ -19,7 +19,7 @@ export default function ChatInputPanel() {
   };
 
   return (
-    <div className="dbgpt-ui-font flex w-full flex-col bg-transparent pb-5 pt-2">
+    <div className="dbgpt-ui-font flex w-full flex-col bg-transparent pb-2 pt-2">
       <div
         id="input-panel"
         className={`relative flex min-h-[132px] flex-1 flex-col rounded-2xl border border-[#eceff5] bg-white px-4 pb-3 pt-3 shadow-[0_2px_8px_rgba(15,23,42,0.04)] dark:border-[rgba(255,255,255,0.14)] dark:bg-[rgba(255,255,255,0.08)] ${

@@ -41,17 +41,17 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
   }
 
   const payload = (await response.json()) as T | ApiEnvelope<T>;
-  if (
-    payload &&
-    typeof payload === "object" &&
-    "code" in payload &&
-    (payload as ApiEnvelope<T>).code === 401
-  ) {
-    handleUnauthorizedRedirect();
-    throw new Error((payload as ApiEnvelope<T>).message || "Unauthorized");
-  }
-  if (payload && typeof payload === "object" && "data" in payload) {
-    return (payload as ApiEnvelope<T>).data as T;
+  if (payload && typeof payload === "object" && "code" in payload) {
+    const envelope = payload as ApiEnvelope<T>;
+    const code = envelope.code ?? 200;
+    if (code === 401) {
+      handleUnauthorizedRedirect();
+      throw new Error(envelope.message || "Unauthorized");
+    }
+    if (code !== 200) {
+      throw new Error(envelope.message || `Request failed: ${code}`);
+    }
+    return envelope.data as T;
   }
   return payload as T;
 }

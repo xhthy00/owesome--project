@@ -1,4 +1,5 @@
 import { getApiBaseUrl, apiRequest } from "@/api/client";
+import { getAccessToken } from "@/auth/session";
 import { streamSSE } from "@/utils/sse";
 
 export type SendMessagePayload = {
@@ -137,9 +138,11 @@ export async function sendMessageStream(
   handlers: StreamHandlers,
   signal?: AbortSignal
 ) {
+  const token = getAccessToken();
   return streamSSE({
     url: `${getApiBaseUrl()}/chat/chat-stream`,
     body: payload,
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
     signal,
     onEvent: (evt) => {
       const data = (evt.data ?? {}) as Record<string, unknown>;

@@ -1,13 +1,18 @@
-import { App as AntApp, ConfigProvider, theme } from "antd";
+import { ApartmentOutlined, BellOutlined, LogoutOutlined, UserOutlined } from "@ant-design/icons";
+import { App as AntApp, ConfigProvider, Dropdown, Select, theme } from "antd";
+import type { MenuProps } from "antd";
 import type { AppProps } from "next/app";
-import { useContext, useEffect, useMemo } from "react";
+import { useRouter } from "next/router";
+import { useContext, useEffect, useMemo, useState } from "react";
 import { getCurrentUser } from "@/api/auth";
 import { ChatContext, ChatContextProvider } from "@/app/chat-context";
+import { systemApi } from "@/api/system";
 import { clearAccessToken, getAccessToken } from "@/auth/session";
 import SideBar from "@/components/layout/side-bar";
 import "../styles/globals.css";
 
 const APP_MODE_KEY = "frontend_react_mode";
+const WORKSPACE_OID_KEY = "frontend_react_workspace_oid";
 
 function LayoutWrapper({
   children,
@@ -17,11 +22,28 @@ function LayoutWrapper({
   pathname: string;
 }) {
   const { mode, setMode } = useContext(ChatContext);
+  const router = useRouter();
+  const [workspaceOptions, setWorkspaceOptions] = useState<Array<{ value: number; label: string }>>([]);
+  const [workspaceOid, setWorkspaceOid] = useState<number | undefined>(undefined);
   const isBypassLayout =
     pathname === "/login" ||
     pathname.startsWith("/mobile") ||
     pathname.startsWith("/share") ||
     pathname === "/construct/app/extra";
+  const userMenuItems: MenuProps["items"] = [
+    {
+      key: "logout",
+      icon: <LogoutOutlined />,
+      label: "退出登录"
+    }
+  ];
+
+  const onUserMenuClick: MenuProps["onClick"] = ({ key }) => {
+    if (key !== "logout") return;
+    clearAccessToken();
+    const redirect = encodeURIComponent(router.asPath || "/");
+    void router.replace(`/login?redirect=${redirect}`);
+  };
 
   useEffect(() => {
     const savedMode = window.localStorage.getItem(APP_MODE_KEY);
@@ -35,6 +57,34 @@ function LayoutWrapper({
     document.body.classList.toggle("light", mode !== "dark");
     window.localStorage.setItem(APP_MODE_KEY, mode);
   }, [mode]);
+
+  useEffect(() => {
+    if (isBypassLayout) return;
+    let active = true;
+    void Promise.all([systemApi.listWorkspaces(), getCurrentUser()])
+      .then(([workspaces, user]) => {
+        if (!active) return;
+        const opts = workspaces.map((w) => ({ value: Number(w.id), label: w.name || `工作空间 ${w.id}` }));
+        setWorkspaceOptions(opts);
+        const fromStorage = Number(window.localStorage.getItem(WORKSPACE_OID_KEY) || "");
+        const hasStorage = Number.isFinite(fromStorage) && opts.some((o) => o.value === fromStorage);
+        const preferred = hasStorage ? fromStorage : Number(user.oid);
+        const fallback = opts[0]?.value;
+        const resolved = opts.some((o) => o.value === preferred) ? preferred : fallback;
+        setWorkspaceOid(resolved);
+        if (resolved != null) {
+          window.localStorage.setItem(WORKSPACE_OID_KEY, String(resolved));
+          window.dispatchEvent(new CustomEvent("workspace:changed", { detail: { oid: resolved } }));
+        }
+      })
+      .catch(() => {
+        if (!active) return;
+        setWorkspaceOptions([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [isBypassLayout]);
 
   const themeConfig = useMemo(
     () => ({
@@ -57,7 +107,44 @@ function LayoutWrapper({
             <div className="hidden shrink-0 md:block">
               <SideBar />
             </div>
-            <div className="relative flex flex-1 flex-col overflow-hidden">{children}</div>
+            <div className="relative flex flex-1 flex-col overflow-hidden">
+              <div className="flex h-14 shrink-0 items-center justify-between border-b border-gray-200 bg-white/80 px-8 text-sm text-[#3a465d] backdrop-blur dark:border-gray-800 dark:bg-[#111217]/80">
+                <span>启明AI分析助手</span>
+                <div className="flex items-center gap-4 text-[#7d8ba2]">
+                  {workspaceOptions.length ? (
+                    <div className="flex h-9 items-center gap-2 rounded-full border border-[#d9e2f0] bg-[#f7faff] px-3 pr-2 shadow-sm dark:border-[#2f3a52] dark:bg-[#1a2130]">
+                      <ApartmentOutlined className="text-[13px] text-[#4f6fa8] dark:text-[#8aa8de]" />
+                      <Select
+                        size="middle"
+                        variant="borderless"
+                        value={workspaceOid}
+                        style={{ width: 190 }}
+                        options={workspaceOptions}
+                        placeholder="选择工作空间"
+                        popupMatchSelectWidth={240}
+                        onChange={(value) => {
+                          setWorkspaceOid(value);
+                          window.localStorage.setItem(WORKSPACE_OID_KEY, String(value));
+                          window.dispatchEvent(new CustomEvent("workspace:changed", { detail: { oid: value } }));
+                        }}
+                      />
+                    </div>
+                  ) : null}
+                  <BellOutlined />
+                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs dark:bg-gray-800">300</span>
+                  <Dropdown menu={{ items: userMenuItems, onClick: onUserMenuClick }} trigger={["click"]} placement="bottomRight">
+                    <button
+                      type="button"
+                      className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-500 text-[15px] text-white"
+                      aria-label="用户菜单"
+                    >
+                      <UserOutlined />
+                    </button>
+                  </Dropdown>
+                </div>
+              </div>
+              <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+            </div>
           </div>
         )}
       </AntApp>

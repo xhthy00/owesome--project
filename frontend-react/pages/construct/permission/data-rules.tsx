@@ -33,7 +33,7 @@ type RuleForm = {
     name: string;
     type: "row" | "column";
     ds_id?: number;
-    table_id?: number;
+    table_name?: string;
     expression_tree?: string;
     permissions?: string;
   }>;
@@ -46,6 +46,16 @@ type ColumnPermissionRow = {
   enable: boolean;
 };
 
+function toJsonString(value: unknown, fallback: string) {
+  if (typeof value === "string") return value;
+  if (value == null) return fallback;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return fallback;
+  }
+}
+
 export default function ConstructPermissionDataRulesPage() {
   const [list, setList] = useState<PermissionGroup[]>([]);
   const [loading, setLoading] = useState(false);
@@ -57,6 +67,26 @@ export default function ConstructPermissionDataRulesPage() {
   const [tableOptions, setTableOptions] = useState<Record<number, DatasourceTableItem[]>>({});
   const [fieldOptions, setFieldOptions] = useState<Record<number, DatasourceFieldItem[]>>({});
   const [form] = Form.useForm<RuleForm>();
+
+  const buildFormValuesFromGroup = (group: PermissionGroup): RuleForm => {
+    const groupUsers = Array.isArray(group.users) ? group.users.map((u) => Number(u)) : [];
+    const groupPermissions = Array.isArray(group.permissions) ? group.permissions : [];
+    return {
+      id: group.id,
+      name: group.name,
+      users: groupUsers,
+      permissions: groupPermissions.length
+        ? groupPermissions.map((p, idx) => ({
+            name: p.name || `rule_${idx + 1}`,
+            type: p.type,
+            ds_id: p.ds_id,
+            table_name: p.table_name,
+            expression_tree: toJsonString(p.expression_tree, "{}"),
+            permissions: toJsonString(p.permissions, "[]")
+          }))
+        : [{ name: "rule_1", type: "row", expression_tree: "{}", permissions: "[]" }]
+    };
+  };
 
   const searchUsers = async (keyword = "") => {
     const res = keyword
@@ -76,7 +106,7 @@ export default function ConstructPermissionDataRulesPage() {
     setLoading(true);
     try {
       const res = await permissionApi.listPermissionGroups();
-      setList(res);
+      setList(Array.isArray(res) ? res : []);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "加载权限规则失败");
     } finally {
@@ -130,7 +160,10 @@ export default function ConstructPermissionDataRulesPage() {
         message="权限说明：以规则组为单位；每组可包含多条行/列规则，并可绑定多个受限用户。"
       />
       <Row gutter={[16, 16]}>
-        {list.map((group) => (
+        {list.map((group) => {
+          const groupUsers = Array.isArray(group.users) ? group.users : [];
+          const groupPermissions = Array.isArray(group.permissions) ? group.permissions : [];
+          return (
           <Col key={group.id} xs={24} md={12} lg={8}>
             <Card
               title={group.name}
@@ -140,21 +173,7 @@ export default function ConstructPermissionDataRulesPage() {
                     type="text"
                     onClick={() => {
                       setEditing(group);
-                      form.setFieldsValue({
-                        id: group.id,
-                        name: group.name,
-                        users: group.users,
-                        permissions: group.permissions.length
-                          ? group.permissions.map((p, idx) => ({
-                              name: p.name || `rule_${idx + 1}`,
-                              type: p.type,
-                              ds_id: p.ds_id,
-                              table_id: p.table_id,
-                              expression_tree: p.expression_tree || "{}",
-                              permissions: p.permissions || "[]"
-                            }))
-                          : [{ name: "rule_1", type: "row", expression_tree: "{}", permissions: "[]" }]
-                      });
+                      form.setFieldsValue(buildFormValuesFromGroup(group));
                       setActiveStep(0);
                       setOpen(true);
                       void searchUsers();
@@ -166,21 +185,7 @@ export default function ConstructPermissionDataRulesPage() {
                     type="text"
                     onClick={() => {
                       setEditing(group);
-                      form.setFieldsValue({
-                        id: group.id,
-                        name: group.name,
-                        users: group.users,
-                        permissions: group.permissions.length
-                          ? group.permissions.map((p, idx) => ({
-                              name: p.name || `rule_${idx + 1}`,
-                              type: p.type,
-                              ds_id: p.ds_id,
-                              table_id: p.table_id,
-                              expression_tree: p.expression_tree || "{}",
-                              permissions: p.permissions || "[]"
-                            }))
-                          : [{ name: "rule_1", type: "row", expression_tree: "{}", permissions: "[]" }]
-                      });
+                      form.setFieldsValue(buildFormValuesFromGroup(group));
                       setActiveStep(1);
                       setOpen(true);
                       void searchUsers();
@@ -193,22 +198,7 @@ export default function ConstructPermissionDataRulesPage() {
                     icon={<EditOutlined />}
                     onClick={() => {
                       setEditing(group);
-                      const first = group.permissions[0];
-                      form.setFieldsValue({
-                        id: group.id,
-                        name: group.name,
-                        users: group.users,
-                        permissions: group.permissions.length
-                          ? group.permissions.map((p, idx) => ({
-                              name: p.name || `rule_${idx + 1}`,
-                              type: p.type,
-                              ds_id: p.ds_id,
-                              table_id: p.table_id,
-                              expression_tree: p.expression_tree || "{}",
-                              permissions: p.permissions || "[]"
-                            }))
-                          : [{ name: "rule_1", type: "row", expression_tree: "{}", permissions: "[]" }]
-                      });
+                      form.setFieldsValue(buildFormValuesFromGroup(group));
                       setActiveStep(0);
                       setOpen(true);
                       void searchUsers();
@@ -218,9 +208,13 @@ export default function ConstructPermissionDataRulesPage() {
                     title={`删除规则组 ${group.name} ?`}
                     description="删除后该组全部规则立即失效，相关成员恢复对应数据访问权限。"
                     onConfirm={async () => {
-                      await permissionApi.deletePermissionGroup(group.id);
-                      message.success("删除成功");
-                      await reload();
+                      try {
+                        await permissionApi.deletePermissionGroup(group.id);
+                        message.success("删除成功");
+                        await reload();
+                      } catch (err) {
+                        message.error(err instanceof Error ? err.message : "删除失败");
+                      }
                     }}
                   >
                     <Button type="text" danger icon={<DeleteOutlined />} />
@@ -228,10 +222,10 @@ export default function ConstructPermissionDataRulesPage() {
                 </Space>
               }
             >
-              <div className="mb-2 text-sm text-gray-500">限制用户数: {group.users.length}</div>
-              <div className="mb-2 text-sm text-gray-500">规则条数: {group.permissions.length}</div>
+              <div className="mb-2 text-sm text-gray-500">限制用户数: {groupUsers.length}</div>
+              <div className="mb-2 text-sm text-gray-500">规则条数: {groupPermissions.length}</div>
               <Space wrap>
-                {group.permissions.map((item) => (
+                {groupPermissions.map((item) => (
                   <Tag key={`${group.id}-${item.id || item.name}`} color={item.type === "row" ? "green" : "blue"}>
                     {item.type === "row" ? "行权限" : "列权限"}
                   </Tag>
@@ -239,7 +233,8 @@ export default function ConstructPermissionDataRulesPage() {
               </Space>
             </Card>
           </Col>
-        ))}
+          );
+        })}
       </Row>
 
       <Modal
@@ -268,20 +263,31 @@ export default function ConstructPermissionDataRulesPage() {
                 onClick={() => {
                   form
                     .validateFields()
-                    .then(async (values) => {
-                      await permissionApi.savePermissionGroup({
-                        id: values.id,
-                        name: values.name,
-                        users: values.users || [],
-                        permissions: (values.permissions || []).map((item) => ({
-                          ...item,
-                          expression_tree: item.expression_tree || "{}",
-                          permissions: item.permissions || "[]"
-                        }))
-                      });
-                      message.success("保存成功");
-                      setOpen(false);
-                      await reload();
+                    .then(async () => {
+                      const values = form.getFieldsValue(true) as RuleForm;
+                      const permissionItems = Array.isArray(values.permissions) ? values.permissions : [];
+                      if (permissionItems.length === 0) {
+                        message.error("请至少添加一条权限规则后再保存");
+                        setActiveStep(0);
+                        return;
+                      }
+                      try {
+                        await permissionApi.savePermissionGroup({
+                          id: values.id,
+                          name: values.name,
+                          users: values.users || [],
+                          permissions: permissionItems.map((item) => ({
+                            ...item,
+                            expression_tree: item.expression_tree || "{}",
+                            permissions: item.permissions || "[]"
+                          }))
+                        });
+                        message.success("保存成功");
+                        setOpen(false);
+                        await reload();
+                      } catch (err) {
+                        message.error(err instanceof Error ? err.message : "保存失败");
+                      }
                     })
                     .catch(() => void 0);
                 }}
@@ -356,14 +362,14 @@ export default function ConstructPermissionDataRulesPage() {
                             }}
                           />
                         </Form.Item>
-                        <Form.Item name={[field.name, "table_id"]} label="数据表ID">
-                          <Input placeholder="手动输入数据表ID（例如：12）" />
+                        <Form.Item name={[field.name, "table_name"]} label="数据表名称">
+                          <Input placeholder="手动输入数据表名称（例如：users）" />
                         </Form.Item>
                         <Form.Item
                           noStyle
                           shouldUpdate={(prev, next) =>
                             prev.permissions?.[field.name]?.type !== next.permissions?.[field.name]?.type ||
-                            prev.permissions?.[field.name]?.table_id !== next.permissions?.[field.name]?.table_id ||
+                            prev.permissions?.[field.name]?.table_name !== next.permissions?.[field.name]?.table_name ||
                             prev.permissions?.[field.name]?.expression_tree !==
                               next.permissions?.[field.name]?.expression_tree
                           }

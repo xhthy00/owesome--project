@@ -17,6 +17,7 @@ class DsPermission(SQLModel, table=True):
     type: str = Field(sa_column=Column(String(64), nullable=False))
     ds_id: Optional[int] = Field(default=None, sa_column=Column(BigInteger, nullable=True))
     table_id: Optional[int] = Field(default=None, sa_column=Column(BigInteger, nullable=True))
+    table_name: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
     expression_tree: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
     permissions: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
     white_list_user: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))

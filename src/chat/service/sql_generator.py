@@ -64,6 +64,7 @@ class SQLGenerator:
         need_title: bool = True,
         step_callback: Optional[StepCallback] = None,
         reasoning_callback: Optional[ReasoningCallback] = None,
+        user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Generate SQL from natural language question.
@@ -128,7 +129,7 @@ class SQLGenerator:
 
         # 2. Get schema information from database
         t1 = time.time()
-        schema_info = self._get_schema(session, datasource, config, db_type)
+        schema_info = self._get_schema(session, datasource, config, db_type, user_id=user_id)
         add_step(
             "schema",
             "读取数据库 schema",
@@ -252,7 +253,7 @@ class SQLGenerator:
 
             config = decrypt_conf(datasource.configuration) if datasource.configuration else {}
             db_type = datasource.type or "pg"
-            schema_info = self._get_schema(session, datasource, config, db_type)
+            _ = self._get_schema(session, datasource, config, db_type, user_id=kwargs.get("user_id"))
 
             # Retry with error message
             result = self.generate_sql(
@@ -272,6 +273,7 @@ class SQLGenerator:
         datasource,
         config: Dict,
         db_type: str,
+        user_id: Optional[int] = None,
     ) -> str:
         """
         Get database schema information.
@@ -279,9 +281,13 @@ class SQLGenerator:
         Returns formatted schema string for prompt.
         """
         from src.datasource.db.db import get_schema_info
+        from src.datasource.service.query_permission import schema_tables_for_user
+        from src.system.crud.crud_user import get_user_by_id
 
         try:
             tables = get_schema_info(db_type, config)
+            user = get_user_by_id(session, user_id) if user_id else None
+            tables = schema_tables_for_user(session, user, int(datasource.id), tables)
             return build_schema_info(tables, db_type)
         except Exception as e:
             logger.warning(f"Failed to get schema: {e}")

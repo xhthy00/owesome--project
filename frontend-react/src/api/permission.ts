@@ -37,7 +37,7 @@ export interface PermissionRuleDetail {
   name: string;
   type: "row" | "column";
   ds_id?: number;
-  table_id?: number;
+  table_name?: string;
   expression_tree?: string;
   permissions?: string;
 }

@@ -26,6 +26,7 @@ from common.core.database import get_session
 from common.core.trace import new_trace_id, set_trace_id
 from common.exceptions.base import NotFoundException
 from common.schemas.response import success_response
+from system.api.system import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +39,12 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 def create_conversation(
     request: ConversationCreate,
     session: Session = Depends(get_session),
-    current_user_id: int = 1  # TODO: Get from auth
+    current_user=Depends(get_current_user),
 ):
     """Create a new conversation."""
     conversation = chat_crud.create_conversation(
         session=session,
-        user_id=current_user_id,
+        user_id=current_user.id,
         title=request.title,
         datasource_id=request.datasource_id,
     )
@@ -57,12 +58,12 @@ def create_conversation(
 def list_conversations(
     limit: int = 50,
     session: Session = Depends(get_session),
-    current_user_id: int = 1  # TODO: Get from auth
+    current_user=Depends(get_current_user),
 ):
     """List user's conversations."""
     conversations = chat_crud.list_conversations(
         session=session,
-        user_id=current_user_id,
+        user_id=current_user.id,
         limit=limit
     )
     items = [ConversationResponse.model_validate(c) for c in conversations]
@@ -76,13 +77,13 @@ def list_conversations(
 def get_conversation(
     conversation_id: int,
     session: Session = Depends(get_session),
-    current_user_id: int = 1  # TODO: Get from auth
+    current_user=Depends(get_current_user),
 ):
     """Get conversation with records."""
     conversation = chat_crud.get_conversation_by_id(
         session=session,
         conversation_id=conversation_id,
-        user_id=current_user_id
+        user_id=current_user.id
     )
     if not conversation:
         raise NotFoundException("Conversation not found")
@@ -90,7 +91,7 @@ def get_conversation(
     records = chat_crud.get_conversation_records(
         session=session,
         conversation_id=conversation_id,
-        user_id=current_user_id
+        user_id=current_user.id
     )
 
     def _parse_json(value, default):
@@ -150,13 +151,13 @@ def update_conversation(
     conversation_id: int,
     request: ConversationUpdate,
     session: Session = Depends(get_session),
-    current_user_id: int = 1  # TODO: Get from auth
+    current_user=Depends(get_current_user),
 ):
     """Update a conversation."""
     conversation = chat_crud.update_conversation(
         session=session,
         conversation_id=conversation_id,
-        user_id=current_user_id,
+        user_id=current_user.id,
         title=request.title,
         datasource_id=request.datasource_id
     )
@@ -173,13 +174,13 @@ def update_conversation(
 def delete_conversation(
     conversation_id: int,
     session: Session = Depends(get_session),
-    current_user_id: int = 1  # TODO: Get from auth
+    current_user=Depends(get_current_user),
 ):
     """Delete a conversation."""
     success = chat_crud.delete_conversation(
         session=session,
         conversation_id=conversation_id,
-        user_id=current_user_id
+        user_id=current_user.id
     )
     if not success:
         raise NotFoundException("Conversation not found")
@@ -193,6 +194,7 @@ def delete_conversation(
 def generate_sql(
     request: ChatRequest,
     session: Session = Depends(get_session),
+    current_user=Depends(get_current_user),
 ):
     """
     Generate SQL from natural language question.
@@ -211,6 +213,7 @@ def generate_sql(
         datasource_id=request.datasource_id,
         session=session,
         need_title=True,
+        user_id=current_user.id,
     )
 
     if not result["is_valid"]:
@@ -245,7 +248,7 @@ def generate_sql(
 def execute_sql(
     request: ChatRequest,
     session: Session = Depends(get_session),
-    current_user_id: int = 1,  # TODO: Get from auth
+    current_user=Depends(get_current_user),
 ):
     """
     Generate and execute SQL from natural language question.
@@ -259,6 +262,7 @@ def execute_sql(
     from common.utils.aes import decrypt_conf
     from datasource.crud import crud_datasource
     from datasource.db.db import execute_sql as db_execute_sql
+    from datasource.service.query_permission import apply_permissions_for_execute
 
     # Get datasource
     datasource = crud_datasource.get_datasource_by_id(session, request.datasource_id)
@@ -274,6 +278,7 @@ def execute_sql(
         datasource_id=request.datasource_id,
         session=session,
         need_title=False,
+        user_id=current_user.id,
     )
 
     reasoning = result.get("reasoning", "")
@@ -282,7 +287,7 @@ def execute_sql(
     if not result["is_valid"]:
         record_id = _persist_record(
             session=session,
-            current_user_id=current_user_id,
+            current_user_id=current_user.id,
             request=request,
             question=request.question,
             sql=result.get("sql", ""),
@@ -307,11 +312,19 @@ def execute_sql(
             message="SQL generation failed"
         )
 
+    sql_exec = apply_permissions_for_execute(
+        session,
+        current_user,
+        int(datasource.id),
+        datasource.type or "pg",
+        result["sql"],
+        result.get("tables"),
+    )
     _t_exec = time.time()
     success, message, exec_result = db_execute_sql(
         db_type=datasource.type,
         config=config,
-        sql=result["sql"],
+        sql=sql_exec,
     )
     steps.append({
         "name": "execute",
@@ -326,10 +339,10 @@ def execute_sql(
 
     record_id = _persist_record(
         session=session,
-        current_user_id=current_user_id,
+        current_user_id=current_user.id,
         request=request,
         question=request.question,
-        sql=result["sql"],
+        sql=sql_exec,
         sql_error=None if success else message,
         exec_result=exec_result if success else None,
         chart_type=result.get("chart_type", "table"),
@@ -343,7 +356,7 @@ def execute_sql(
         return success_response(
             data={
                 "record_id": record_id,
-                "sql": result["sql"],
+                "sql": sql_exec,
                 "result": None,
                 "error": message,
                 "chart_type": result.get("chart_type", "table"),
@@ -356,7 +369,7 @@ def execute_sql(
     return success_response(
         data={
             "record_id": record_id,
-            "sql": result["sql"],
+            "sql": sql_exec,
             "result": exec_result,
             "error": "",
             "chart_type": result.get("chart_type", "table"),
@@ -424,7 +437,7 @@ def _persist_record(
 @router.post("/chat-stream", summary="Chat with streaming output")
 async def chat_stream(
     request: ChatRequest,
-    current_user_id: int = 1,  # TODO: Get from auth
+    current_user=Depends(get_current_user),
 ):
     """
     Chat endpoint with Server-Sent Events (SSE) streaming output.
@@ -459,9 +472,11 @@ async def chat_stream(
         request.agent_mode,
         request.datasource_id,
         request.conversation_id,
-        current_user_id,
+        current_user.id,
         len(request.question or ""),
     )
+
+    current_user_id = current_user.id
 
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
@@ -506,10 +521,13 @@ async def chat_stream(
         from src.common.utils.aes import decrypt_conf
         from src.datasource.crud import crud_datasource
         from src.datasource.db.db import execute_sql as db_execute_sql
+        from src.datasource.service.query_permission import apply_permissions_for_execute
+        from src.system.crud.crud_user import get_user_by_id
 
         steps_acc = []
         reasoning_text = ""
         record_id = 0
+        uid = current_user_id
         try:
             with get_db_session() as session:
                 generator = SQLGenerator()
@@ -530,6 +548,7 @@ async def chat_stream(
                     need_title=False,
                     step_callback=on_step,
                     reasoning_callback=on_reasoning,
+                    user_id=uid,
                 )
 
                 steps_acc = list(result.get("steps", steps_acc))
@@ -553,13 +572,6 @@ async def chat_stream(
                     push("error", {"error": result["error"]})
                     return
 
-                push("sql", {
-                    "sql": result["sql"],
-                    "formatted_sql": result.get("formatted_sql", ""),
-                    "tables": result.get("tables", []),
-                    "chart_type": result.get("chart_type", "table"),
-                })
-
                 datasource = crud_datasource.get_datasource_by_id(session, request.datasource_id)
                 if not datasource:
                     push("error", {"error": "Datasource not found"})
@@ -567,11 +579,26 @@ async def chat_stream(
 
                 config = decrypt_conf(datasource.configuration) if datasource.configuration else {}
 
+                user_row = get_user_by_id(session, uid)
+                sql_exec = apply_permissions_for_execute(
+                    session,
+                    user_row,
+                    int(datasource.id),
+                    datasource.type or "pg",
+                    result["sql"],
+                    result.get("tables"),
+                )
+                push("sql", {
+                    "sql": sql_exec,
+                    "formatted_sql": result.get("formatted_sql", ""),
+                    "tables": result.get("tables", []),
+                    "chart_type": result.get("chart_type", "table"),
+                })
                 t_exec = time.time()
                 success, message, exec_result = db_execute_sql(
                     db_type=datasource.type,
                     config=config,
-                    sql=result["sql"],
+                    sql=sql_exec,
                 )
                 exec_step = {
                     "name": "execute",
@@ -592,7 +619,7 @@ async def chat_stream(
                     current_user_id=current_user_id,
                     request=request,
                     question=request.question,
-                    sql=result["sql"],
+                    sql=sql_exec,
                     sql_error=None if success else message,
                     exec_result=exec_result if success else None,
                     chart_type=result.get("chart_type", "table"),
@@ -713,13 +740,13 @@ def get_recent_questions(
     datasource_id: int,
     limit: int = 10,
     session: Session = Depends(get_session),
-    current_user_id: int = 1  # TODO: Get from auth
+    current_user=Depends(get_current_user),
 ):
     """Get recent questions for a datasource to suggest follow-up questions."""
     questions = chat_crud.get_recent_questions(
         session=session,
         datasource_id=datasource_id,
-        user_id=current_user_id,
+        user_id=current_user.id,
         limit=limit
     )
     return success_response(
