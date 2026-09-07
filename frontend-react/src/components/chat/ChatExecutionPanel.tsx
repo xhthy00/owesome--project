@@ -10,6 +10,7 @@ import {
   EyeOutlined,
   ExpandOutlined,
   FileTextOutlined,
+  FullscreenOutlined,
   LineChartOutlined,
   PieChartOutlined,
   TableOutlined,
@@ -29,6 +30,7 @@ import {
 } from "@/hooks/useChat";
 import G2Chart, { G2ChartType, formatQuerySetLabel, inferChartFields, pickYField } from "@/components/chat/G2Chart";
 import { labelColumn } from "@/utils/columnLabels";
+import { formatNumericDisplay } from "@/utils/formatNumericDisplay";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -73,6 +75,81 @@ type Props = {
     patch: { recommendationsText?: string; reviewStatus?: "pending" | "approved" }
   ) => Promise<ReportPayload>;
 };
+
+function formatQueryCell(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "number" || typeof value === "string") {
+    const formatted = formatNumericDisplay(value);
+    if (typeof value === "number") return formatted;
+    if (formatted !== value) return formatted;
+  }
+  return normalizeToText(value);
+}
+
+function QueryResultTable({
+  columns,
+  rows,
+  rowCount,
+  page,
+  pageSize,
+  onPageChange,
+  maxHeight
+}: {
+  columns: string[];
+  rows: unknown[][];
+  rowCount: number;
+  page: number;
+  pageSize: number;
+  onPageChange: (page: number) => void;
+  maxHeight?: string | number;
+}) {
+  return (
+    <div
+      className="overflow-auto rounded-md border border-[#e5e7eb] dark:border-[#2f3441]"
+      style={maxHeight != null ? { maxHeight } : undefined}
+    >
+      <table className="min-w-full border-collapse text-xs">
+        <thead className="sticky top-0 z-[1] bg-[#f8fafc] dark:bg-[#141923]">
+          <tr>
+            {columns.map((col) => (
+              <th
+                key={col}
+                className="whitespace-nowrap border border-[#e5e7eb] px-2 py-1 text-left dark:border-[#2f3441]"
+              >
+                {labelColumn(col)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, idx) => (
+            <tr key={idx}>
+              {columns.map((col, colIdx) => (
+                <td
+                  key={`${idx}-${col}`}
+                  className="whitespace-nowrap border border-[#e5e7eb] px-2 py-1 dark:border-[#2f3441]"
+                >
+                  {formatQueryCell((row as unknown[])[colIdx])}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="sticky bottom-0 flex items-center justify-between gap-2 bg-white px-2 py-2 dark:bg-[#11131a]">
+        <span className="text-[11px] text-[#98a2b3]">{`共 ${rowCount} 行`}</span>
+        <Pagination
+          size="small"
+          current={page}
+          pageSize={pageSize}
+          total={rowCount}
+          onChange={onPageChange}
+          showSizeChanger={false}
+        />
+      </div>
+    </div>
+  );
+}
 
 function normalizeToText(value: unknown): string {
   if (typeof value === "string") return value;
@@ -133,18 +210,21 @@ export default function ChatExecutionPanel({
   const [summaryThinkExpanded, setSummaryThinkExpanded] = useState(false);
   const [stepDetailExpanded, setStepDetailExpanded] = useState(true);
   const [showReportDialog, setShowReportDialog] = useState(false);
+  const [showQueryDialog, setShowQueryDialog] = useState(false);
   const [selectedReportIndex, setSelectedReportIndex] = useState(-1);
   const [resultTab, setResultTab] = useState<"chart" | "data" | "sql">("chart");
   const [chartType, setChartType] = useState<G2ChartType>("column");
   const [selectedQueryIndex, setSelectedQueryIndex] = useState(-1);
   const [showChartLabel, setShowChartLabel] = useState(false);
   const [dataPage, setDataPage] = useState(1);
+  const [fullDataPage, setFullDataPage] = useState(1);
   const [editOpen, setEditOpen] = useState(false);
   const [editText, setEditText] = useState("");
   const [editSaving, setEditSaving] = useState(false);
   const [reviewSaving, setReviewSaving] = useState(false);
   const [expandedAgents, setExpandedAgents] = useState<Set<FlowAgent>>(() => new Set());
   const pageSize = 20;
+  const fullPageSize = 100;
   const selectedStep = useMemo(
     () => steps.find((s) => s.id === selectedStepId) ?? steps[steps.length - 1],
     [steps, selectedStepId]
@@ -343,8 +423,14 @@ export default function ChatExecutionPanel({
     const start = (dataPage - 1) * pageSize;
     return activeQuery.rows.slice(start, start + pageSize);
   }, [activeQuery, dataPage]);
+  const fullPagedRows = useMemo(() => {
+    if (!activeQuery) return [];
+    const start = (fullDataPage - 1) * fullPageSize;
+    return activeQuery.rows.slice(start, start + fullPageSize);
+  }, [activeQuery, fullDataPage]);
   useEffect(() => {
     setDataPage(1);
+    setFullDataPage(1);
   }, [activeQueryIndex]);
   useEffect(() => {
     setSelectedReportIndex(-1);
@@ -996,6 +1082,17 @@ export default function ChatExecutionPanel({
                       >
                         SQL
                       </button>
+                      <button
+                        onClick={() => {
+                          setResultTab("data");
+                          setShowQueryDialog(true);
+                        }}
+                        className="ml-1 inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-[#3b82f6] hover:bg-[#dbeafe]"
+                        title="全屏查看数据表"
+                      >
+                        <FullscreenOutlined />
+                        <span>全屏</span>
+                      </button>
                     </div>
                   </div>
 
@@ -1054,41 +1151,15 @@ export default function ChatExecutionPanel({
                   ) : null}
 
                   {resultTab === "data" ? (
-                    <div className="overflow-x-auto rounded-md border border-[#e5e7eb] dark:border-[#2f3441]">
-                      <table className="min-w-full border-collapse text-xs">
-                        <thead className="bg-[#f8fafc] dark:bg-[#141923]">
-                          <tr>
-                            {activeQuery.columns.map((col) => (
-                              <th key={col} className="border border-[#e5e7eb] px-2 py-1 text-left dark:border-[#2f3441]">
-                                {labelColumn(col)}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {pagedRows.map((row, idx) => (
-                            <tr key={idx}>
-                              {activeQuery.columns.map((col, colIdx) => (
-                                <td key={`${idx}-${col}`} className="border border-[#e5e7eb] px-2 py-1 dark:border-[#2f3441]">
-                                  {normalizeToText((row as unknown[])[colIdx])}
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                      <div className="flex items-center justify-between gap-2 px-2 py-2">
-                        <span className="text-[11px] text-[#98a2b3]">{`共 ${activeQuery.rowCount} 行`}</span>
-                        <Pagination
-                          size="small"
-                          current={dataPage}
-                          pageSize={pageSize}
-                          total={activeQuery.rowCount}
-                          onChange={setDataPage}
-                          showSizeChanger={false}
-                        />
-                      </div>
-                    </div>
+                    <QueryResultTable
+                      columns={activeQuery.columns}
+                      rows={pagedRows}
+                      rowCount={activeQuery.rowCount}
+                      page={dataPage}
+                      pageSize={pageSize}
+                      onPageChange={setDataPage}
+                      maxHeight={360}
+                    />
                   ) : null}
 
                   {resultTab === "sql" ? (
@@ -1119,6 +1190,28 @@ export default function ChatExecutionPanel({
       <div className="h-7 border-t border-[#e5e7eb] px-4 text-[10px] leading-7 text-[#94a3b8] dark:border-[#2f3441]">
         就绪
       </div>
+      <Modal
+        title={queryDisplayLabels[activeQueryIndex] || "查询结果"}
+        open={showQueryDialog}
+        onCancel={() => setShowQueryDialog(false)}
+        footer={null}
+        width="96%"
+        style={{ top: 16 }}
+        styles={{ body: { padding: 12 } }}
+        destroyOnClose
+      >
+        {activeQuery ? (
+          <QueryResultTable
+            columns={activeQuery.columns}
+            rows={fullPagedRows}
+            rowCount={activeQuery.rowCount}
+            page={fullDataPage}
+            pageSize={fullPageSize}
+            onPageChange={setFullDataPage}
+            maxHeight="78vh"
+          />
+        ) : null}
+      </Modal>
       <Modal
         title={safeReportTitle}
         open={showReportDialog}

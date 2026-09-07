@@ -224,9 +224,16 @@ export default function G2Chart({
         mark.style("radiusTopLeft", 6);
         mark.style("radiusTopRight", 6);
       } else {
-        mark.encode("color", xField);
         mark.axis("y", { title: labelColumn(yField) });
-        mark.legend("color", { title: false });
+        if (type === "line") {
+          // 折线必须同一系列才能把各 x 点连起来；按 x 着色会变成「一场一条、每条 1 点」。
+          mark.legend(false);
+          mark.style("stroke", "#3b82f6");
+          mark.style("lineWidth", 2);
+        } else {
+          mark.encode("color", xField);
+          mark.legend("color", { title: false });
+        }
       }
       if (showLabel) {
         mark.label({

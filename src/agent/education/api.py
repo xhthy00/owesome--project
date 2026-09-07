@@ -682,6 +682,15 @@ _SCHOOL_CODE_PREFIX_RE = re.compile(r"^[A-Za-z]\d{2}")
 _SCHOOL_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
+def _school_sql_filter(school_name: str) -> str:
+    """目录筛选：脱敏 school_id 走编号等值，中文校名走 s_name/name LIKE。"""
+    n = (school_name or "").strip()
+    q = _sql_quote(n)
+    if _SCHOOL_TOKEN_RE.fullmatch(n) and not re.search(r"[\u4e00-\u9fff]", n):
+        return f"sc.school_id = '{q}'"
+    return f"(sch.s_name LIKE '%{q}%' OR sch.name LIKE '%{q}%')"
+
+
 def _school_option_label(raw: str) -> str:
     """芯片/下拉用明文校名；``GZ_…`` 脱敏码不展示；``A01扬州中学`` 去掉校码前缀。"""
     t = str(raw or "").strip()
@@ -752,8 +761,7 @@ async def _load_meta_options(
     def _filters(*, exclude: set[str]) -> list[str]:
         parts: list[str] = []
         if school_name and "school" not in exclude:
-            q = _sql_quote(school_name)
-            parts.append(f"(sch.s_name LIKE '%{q}%' OR sch.name LIKE '%{q}%')")
+            parts.append(_school_sql_filter(school_name))
         if exam_name and "exam" not in exclude:
             parts.append(f"{EXAM_NAME_SQL} LIKE '%{_sql_quote(exam_name)}%'")
         if class_name and "class" not in exclude:
