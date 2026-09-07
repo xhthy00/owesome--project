@@ -11,6 +11,7 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   MessageOutlined,
+  EditOutlined,
   PlusOutlined,
   RightOutlined,
   SafetyCertificateOutlined,
@@ -24,9 +25,10 @@ import { Tooltip } from "antd";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/router";
-import { useContext, useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { ChatContext } from "@/app/chat-context";
-import { Conversation, listConversations } from "@/api/adapter/chatAdapter";
+import { Conversation, listConversations, updateConversation } from "@/api/adapter/chatAdapter";
+import { CONVERSATION_CHANGED_EVENT } from "@/utils/conversationTitle";
 
 const routes = [
   { key: "explore", path: "/", label: "探索广场", icon: <GlobalOutlined /> },
@@ -69,6 +71,9 @@ export default function SideBar() {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [systemExpanded, setSystemExpanded] = useState(false);
   const [menuVisibility, setMenuVisibility] = useState<Record<string, boolean>>({});
+  const [renamingId, setRenamingId] = useState<number | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const skipRenameBlurRef = useRef(false);
   const isPlatformAdmin = useMemo(() => currentUser?.account === "admin" && currentUser?.id === 1, [currentUser]);
 
   useEffect(() => {
@@ -108,7 +113,11 @@ export default function SideBar() {
       void listConversations(50).then((items) => setHistoryList(items));
     };
     window.addEventListener("workspace:changed", reloadHistory);
-    return () => window.removeEventListener("workspace:changed", reloadHistory);
+    window.addEventListener(CONVERSATION_CHANGED_EVENT, reloadHistory);
+    return () => {
+      window.removeEventListener("workspace:changed", reloadHistory);
+      window.removeEventListener(CONVERSATION_CHANGED_EVENT, reloadHistory);
+    };
   }, []);
 
   const activeConversationId = useMemo(() => {
@@ -116,6 +125,33 @@ export default function SideBar() {
     const id = Array.isArray(raw) ? raw[0] : raw;
     return id ? Number(id) : undefined;
   }, [router.query.conversation_id]);
+
+  const startRename = (item: Conversation) => {
+    skipRenameBlurRef.current = false;
+    setRenamingId(item.id);
+    setRenameDraft(item.title || "");
+  };
+
+  const commitRename = async (item: Conversation) => {
+    if (skipRenameBlurRef.current) {
+      skipRenameBlurRef.current = false;
+      return;
+    }
+    const title = renameDraft.trim().slice(0, 64);
+    setRenamingId(null);
+    if (!title || title === (item.title || "")) return;
+    try {
+      const updated = await updateConversation(item.id, { title });
+      setHistoryList((prev) => prev.map((c) => (c.id === item.id ? { ...c, title: updated.title } : c)));
+    } catch {
+      void listConversations(50).then((items) => setHistoryList(items));
+    }
+  };
+
+  const cancelRename = () => {
+    skipRenameBlurRef.current = true;
+    setRenamingId(null);
+  };
 
   const groupedHistory = useMemo(() => {
     const toDate = (value?: string) => {
@@ -383,19 +419,65 @@ export default function SideBar() {
                     <div className="space-y-1">
                       {group.items.map((item) => {
                         const active = activeConversationId === item.id;
+                        const editing = renamingId === item.id;
                         return (
-                          <Link
+                          <div
                             key={item.id}
-                            href={{ pathname: "/chat", query: { conversation_id: item.id } }}
-                            className={`block rounded-lg px-3 py-2 transition ${
+                            className={`group relative rounded-lg transition ${
                               active
                                 ? "border border-[#dbeafe] bg-[#f5f9ff] text-[#1d4ed8] shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:border-[#2f4b75] dark:bg-[#1d2940] dark:text-[#93c5fd]"
                                 : "border border-transparent hover:bg-white/80 dark:hover:bg-[#2a3040]"
                             }`}
                           >
-                            <div className="truncate text-[13px] font-medium leading-5">{item.title || `对话 ${item.id}`}</div>
-                            <div className="mt-0.5 truncate text-[10px] text-[#98a2b3]">{item.update_time?.slice(0, 16) || "刚刚"}</div>
-                          </Link>
+                            {editing ? (
+                              <input
+                                autoFocus
+                                value={renameDraft}
+                                maxLength={64}
+                                onChange={(e) => setRenameDraft(e.target.value)}
+                                onBlur={() => {
+                                  void commitRename(item);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    (e.target as HTMLInputElement).blur();
+                                  } else if (e.key === "Escape") {
+                                    e.preventDefault();
+                                    cancelRename();
+                                  }
+                                }}
+                                className="m-1 w-[calc(100%-8px)] rounded border border-[#93c5fd] bg-white px-2 py-1 text-[13px] leading-5 text-[#1c2533] outline-none dark:border-[#2f4b75] dark:bg-[#1d2940] dark:text-[#93c5fd]"
+                              />
+                            ) : (
+                              <>
+                                <Link
+                                  href={{ pathname: "/chat", query: { conversation_id: item.id } }}
+                                  className="block rounded-lg py-2 pl-3 pr-8"
+                                  title={item.title || `对话 ${item.id}`}
+                                >
+                                  <div className="truncate text-[13px] font-medium leading-5">
+                                    {item.title || `对话 ${item.id}`}
+                                  </div>
+                                  <div className="mt-0.5 truncate text-[10px] text-[#98a2b3]">
+                                    {item.update_time?.slice(0, 16) || "刚刚"}
+                                  </div>
+                                </Link>
+                                <button
+                                  type="button"
+                                  title="重命名"
+                                  className="absolute right-1 top-2 hidden h-6 w-6 items-center justify-center rounded text-[#98a2b3] hover:bg-white hover:text-[#3d4a64] group-hover:flex dark:hover:bg-[#34384a] dark:hover:text-gray-200"
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    startRename(item);
+                                  }}
+                                >
+                                  <EditOutlined className="text-xs" />
+                                </button>
+                              </>
+                            )}
+                          </div>
                         );
                       })}
                     </div>

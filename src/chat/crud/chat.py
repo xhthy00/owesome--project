@@ -45,26 +45,29 @@ def create_conversation(
 
 
 def get_conversation_by_id(
-    session: Session, conversation_id: int, user_id: int, oid: int
+    session: Session, conversation_id: int, user_id: int, oid: int | None = None
 ) -> Optional[Conversation]:
-    """Get conversation by ID（限定工作空间）。"""
+    """Get conversation by ID（按账号；暂不按工作空间过滤）。"""
+    _ = oid
     statement = select(Conversation).where(
         and_(
             Conversation.id == conversation_id,
             Conversation.user_id == user_id,
-            Conversation.oid == oid,
-            Conversation.is_deleted == False
+            Conversation.is_deleted == False,  # noqa: E712
         )
     )
     return session.exec(statement).first()
 
 
-def list_conversations(session: Session, user_id: int, oid: int, limit: int = 50) -> List[Conversation]:
-    """List user's conversations in a workspace.
+def list_conversations(
+    session: Session, user_id: int, oid: int | None = None, limit: int = 50
+) -> List[Conversation]:
+    """List user's conversations across workspaces.
 
     排除分析工具报告历史会话（标题前缀 ``[分析工具]`` 或含 analysis_tool 记录），
-    避免与侧栏「历史会话」混在一起。
+    避免与侧栏「历史会话」混在一起。``oid`` 暂忽略，任务按账号全局可见。
     """
+    _ = oid
     analysis_conv_ids = (
         select(ConversationRecord.conversation_id)
         .where(ConversationRecord.agent_mode == "analysis_tool")
@@ -75,7 +78,6 @@ def list_conversations(session: Session, user_id: int, oid: int, limit: int = 50
         .where(
             and_(
                 Conversation.user_id == user_id,
-                Conversation.oid == oid,
                 Conversation.is_deleted == False,  # noqa: E712
                 ~Conversation.title.like(f"{ANALYSIS_REPORT_TITLE_PREFIX}%"),
                 ~Conversation.id.in_(analysis_conv_ids),
