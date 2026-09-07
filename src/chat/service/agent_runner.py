@@ -247,9 +247,9 @@ class _RunConstraints:
     target_exam: str | None = None
     #: 本轮科目（问句或会话继承）。
     target_subject: str | None = None
-    #: 近几轮问答短摘要，仅供指代，不作数字权威源。
-    conversation_brief: str | None = None
-    #: 落库用的用户原话（芯片合并之后、继承补充之前）。
+    #: SQLBot 风格窗口历史（type=human/ai），注入 LLM messages。
+    conversation_history: list[dict[str, Any]] | None = None
+    #: 落库用的用户原话。
     user_utterance: str | None = None
     #: 本轮已对齐的考试/校/班/区县字面量，供 SQL 护栏。
     bound_literals: list[str] | None = None
@@ -280,8 +280,8 @@ class _RunConstraints:
             ctx["target_exam"] = self.target_exam
         if self.target_subject:
             ctx["target_subject"] = self.target_subject
-        if self.conversation_brief:
-            ctx["conversation_brief"] = self.conversation_brief
+        if self.conversation_history:
+            ctx["conversation_history"] = list(self.conversation_history)
         if self.user_utterance:
             ctx["user_utterance"] = self.user_utterance
         if self.bound_literals:
@@ -294,6 +294,7 @@ class _RunConstraints:
         tc = data.get("target_classes")
         rr = data.get("report_route")
         hint = data.get("edu_sql_hint")
+        hist = data.get("conversation_history")
         return cls(
             locked_tables=list(data.get("locked_tables") or []),
             required_keywords=list(data.get("required_keywords") or []),
@@ -308,9 +309,7 @@ class _RunConstraints:
             edu_sql_hint=str(hint).strip() if hint else None,
             target_exam=str(data["target_exam"]).strip() if data.get("target_exam") else None,
             target_subject=str(data["target_subject"]).strip() if data.get("target_subject") else None,
-            conversation_brief=str(data["conversation_brief"]).strip()
-            if data.get("conversation_brief")
-            else None,
+            conversation_history=list(hist) if isinstance(hist, list) else None,
             user_utterance=str(data["user_utterance"]).strip() if data.get("user_utterance") else None,
             bound_literals=[
                 str(x).strip()
@@ -346,8 +345,21 @@ def _build_shared_constraints(question: str, user_id: int) -> _RunConstraints:
     )
 
 
+def _attach_conversation_history(
+    constraints: _RunConstraints,
+    conversation_id: int | None,
+) -> _RunConstraints:
+    """Load SQLBot-style windowed messages into constraints."""
+    from src.chat.service.message_history import load_windowed_history
+
+    hist = load_windowed_history(conversation_id)
+    if hist:
+        constraints.conversation_history = hist
+    return constraints
+
+
 def _bind_effective_question(request: ChatRequest, gate: Any) -> None:
-    """闸门返回后：Agent 用带继承槽的问句；落库仍用 user_utterance。"""
+    """闸门返回后：Agent 用带继承槽的问句。"""
     eq = str(getattr(gate, "effective_question", "") or "").strip()
     if eq:
         request.question = eq
@@ -462,6 +474,7 @@ async def run_agent_stream(
         constraints = gate.constraints or _build_shared_constraints(
             request.question, current_user_id
         )
+        _attach_conversation_history(constraints, request.conversation_id)
         phase = await _run_data_analyst_phase(
             request=request,
             current_user_id=current_user_id,
@@ -564,6 +577,10 @@ async def run_team_stream(
         if gate.halted:
             return gate.record_id
         _bind_effective_question(request, gate)
+        shared_constraints = gate.constraints or _build_shared_constraints(
+            request.question, current_user_id
+        )
+        _attach_conversation_history(shared_constraints, request.conversation_id)
         if get_settings().team_orchestrator == "langgraph":
             from src.chat.service.team_graph import run_team_stream_graph
 
@@ -575,7 +592,7 @@ async def run_team_stream(
                 persist=persist,
                 enable_tool_agent=enable_tool_agent,
                 workspace_oid=workspace_oid,
-                constraints=gate.constraints,
+                constraints=shared_constraints,
             )
         return await _run_team_stream_legacy(
             request=request,
@@ -585,7 +602,7 @@ async def run_team_stream(
             persist=persist,
             enable_tool_agent=enable_tool_agent,
             workspace_oid=workspace_oid,
-            constraints=gate.constraints,
+            constraints=shared_constraints,
         )
 
 
@@ -1332,17 +1349,10 @@ async def _run_summarizer_multi(
         fact_answer=fact_answer,
         question=question,
     )
-    brief = "（无）"
-    for _, phase in sub_phases:
-        c = phase.state.constraints
-        if c and str(c.conversation_brief or "").strip():
-            brief = str(c.conversation_brief).strip()
-            break
     context = {
         "question": question,
         "sub_tasks_block": sub_tasks_block,
         "answer_mode": "fact" if fact_answer else "report",
-        "conversation_brief": brief,
     }
     await _emit_agent_speak(emit, agent="Summarizer", status="start", steps=steps)
     try:
@@ -2475,6 +2485,11 @@ def _persist_sync(
         return 0
     try:
         from src.chat.crud import chat as chat_crud
+        from src.chat.service.message_history import (
+            build_turn_log_messages,
+            load_windowed_history,
+            persist_generate_sql_log,
+        )
         from src.common.core.database import get_db_session
 
         with get_db_session() as session:
@@ -2505,7 +2520,23 @@ def _persist_sync(
                 elapsed_ms=elapsed_ms,
                 workspace_oid=workspace_oid,
             )
-            return record.id or 0
+            rid = record.id or 0
+
+        # SQLBot-style chat_log: windowed history + this turn Q&A
+        hist = load_windowed_history(int(request.conversation_id))
+        ai_content = (summary or reasoning or sql_error or "").strip() or "(empty)"
+        persist_generate_sql_log(
+            conversation_id=int(request.conversation_id),
+            record_id=rid or None,
+            messages=build_turn_log_messages(
+                history=hist,
+                human_content=question,
+                ai_content=ai_content,
+            ),
+            reasoning_content=reasoning or None,
+            error=not is_success,
+        )
+        return rid
     except Exception as e:  # noqa: BLE001
         logger.warning("persist agent record failed: %s", e)
         return 0

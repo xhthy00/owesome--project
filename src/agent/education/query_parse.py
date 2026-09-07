@@ -364,6 +364,17 @@ def is_vague_exam_name(name: str) -> bool:
         "换个考试",
         "别的考试",
         "换考试",
+        "期中",
+        "期末",
+        "月考",
+        "摸底",
+        "模拟",
+        "模考",
+        "联考",
+        "统考",
+        "期中考试",
+        "期末考试",
+        "单元测验",
     }:
         return True
     if re.fullmatch(r"(?:这|最近|近)?几[次场](?:考试|成绩|的)?", n):
@@ -372,6 +383,30 @@ def is_vague_exam_name(name: str) -> bool:
         return True
     # 「扬州中学本次」这类：学校名 + 指代，不是考试专名
     if re.search(r"(?:本次|该次|此次|这次)$", n):
+        return True
+    # 「看看期中考试」「期中考试成绩」——仅泛化词，无专名场次
+    core = re.sub(
+        r"^(?:帮我)?(?:看一下|看看|看下|分析一下|分析)?",
+        "",
+        n,
+    )
+    core = re.sub(r"(?:成绩|情况|分析|报告)$", "", core).strip()
+    if core in {
+        "期中",
+        "期末",
+        "月考",
+        "摸底",
+        "模拟",
+        "模考",
+        "联考",
+        "统考",
+        "期中考试",
+        "期末考试",
+        "单元测验",
+        "考试",
+    }:
+        return True
+    if re.fullmatch(r"(?:期中|期末|月考|摸底|模拟|模考|联考|统考)(?:考试)?", core):
         return True
     return False
 
@@ -1635,9 +1670,6 @@ def format_scope_constraints(constraints: dict[str, Any] | None) -> str:
         parts.append(
             "指代「这场/刚才/该班」时必须用已确认范围，禁止另选默认考试或默查全市。"
         )
-    brief = str(raw.get("conversation_brief") or "").strip()
-    if brief:
-        parts.append("近几轮摘要：\n" + brief)
     keywords = raw.get("required_keywords") or []
     if keywords:
         kw = "、".join(str(k) for k in keywords[:12])

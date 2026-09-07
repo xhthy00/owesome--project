@@ -245,7 +245,11 @@ async def maybe_clarify_turn(
     persist: bool = True,
     workspace_oid: int = 1,
 ) -> ClarifyTurnResult:
-    """合并 pending → 分类 → 抽槽 → LLM 判定。需追问则 SSE + 落库并 halted。"""
+    """合并 pending → 分类 → 抽槽 → 规则追问。需追问则 SSE + 落库并 halted。
+
+    非教育问句且无 pending 时直接放行（通用 BI 不追问）。
+    """
+    from src.agent.education.prompt_context import is_education_question
     from src.chat.service.conversation_context import (
         apply_inherited_supplements,
         extra_inherited_slots,
@@ -257,6 +261,18 @@ async def maybe_clarify_turn(
     if pending:
         request.question = merge_clarification_reply(pending, request.question)
     persist_question = request.question
+
+    # 通用 BI：无 pending 且非教育场景 → 不追问
+    if not pending and not is_education_question(request.question):
+        constraints = _build_shared_constraints(request.question, current_user_id)
+        constraints.report_audience = request.report_audience
+        constraints.user_utterance = persist_question
+        return ClarifyTurnResult(
+            halted=False,
+            constraints=constraints,
+            effective_question=request.question,
+            persist_question=persist_question,
+        )
 
     constraints = _build_shared_constraints(request.question, current_user_id)
     constraints.report_audience = request.report_audience
@@ -271,8 +287,6 @@ async def maybe_clarify_turn(
     filled = merge_inherited_slots(current_filled, turn_ctx.inherited, request.question)
     extra = extra_inherited_slots(current_filled, filled)
     effective_question = apply_inherited_supplements(request.question, extra)
-    if turn_ctx.brief:
-        constraints.conversation_brief = turn_ctx.brief
     _apply_filled(constraints, filled)
     candidates = candidate_missing_slots(route, request.question, filled, edu)
 

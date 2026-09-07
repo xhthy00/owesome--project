@@ -82,6 +82,9 @@ class SQLGenerator:
         step_callback: Optional[StepCallback] = None,
         reasoning_callback: Optional[ReasoningCallback] = None,
         user_id: Optional[int] = None,
+        conversation_id: Optional[int] = None,
+        error_msg: str = "",
+        history: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """
         Generate SQL from natural language question.
@@ -95,11 +98,21 @@ class SQLGenerator:
             data_training: SQL training examples
             custom_prompt: Custom prompt information
             need_title: Whether to generate conversation title
+            conversation_id: Session id for SQLBot-style message window history
+            error_msg: Previous SQL execution error to inject into user prompt
+            history: Optional role-dicts history; if None and conversation_id set, load from chat_log
 
         Returns:
             Dict with keys: sql, is_valid, error, formatted_sql, tables,
-            chart_type, brief, reasoning, steps
+            chart_type, brief, reasoning, steps, log_messages
         """
+        from src.chat.service.message_history import (
+            build_turn_log_messages,
+            load_windowed_history,
+            make_log_message,
+            to_role_dicts,
+        )
+
         steps: List[Dict[str, Any]] = []
 
         def add_step(name: str, label: str, started: float, status: str = "ok", detail: str = "") -> None:
@@ -118,7 +131,7 @@ class SQLGenerator:
                     logger.warning(f"step_callback raised: {cb_err}")
 
         def fail(error: str, sql: str = "", parse_result: Optional[Dict[str, Any]] = None,
-                 reasoning: str = "") -> Dict[str, Any]:
+                 reasoning: str = "", log_messages: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
             return {
                 "sql": sql,
                 "is_valid": False,
@@ -129,6 +142,7 @@ class SQLGenerator:
                 "brief": (parse_result or {}).get("brief", ""),
                 "reasoning": reasoning,
                 "steps": steps,
+                "log_messages": log_messages or [],
             }
 
         # 1. Get datasource and decrypt config
@@ -154,6 +168,32 @@ class SQLGenerator:
             detail=f"长度 {len(schema_info)} 字符",
         )
 
+        # Multi-turn: previous SQL error + windowed history (SQLBot-aligned)
+        prev_error = (error_msg or "").strip()
+        if not prev_error and conversation_id:
+            try:
+                from src.chat.crud.chat import get_last_execute_sql_error
+
+                prev_error = get_last_execute_sql_error(session, int(conversation_id)) or ""
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("get_last_execute_sql_error failed: %s", exc)
+
+        windowed_raw: List[Dict[str, Any]] = []
+        if history is None and conversation_id:
+            windowed_raw = load_windowed_history(int(conversation_id))
+            history = to_role_dicts(windowed_raw)
+        elif history:
+            # Caller already passed role-dicts; keep raw empty for log (re-derive from history)
+            windowed_raw = [
+                {
+                    "type": "ai" if m.get("role") in ("assistant", "ai") else "human",
+                    "content": m.get("content", ""),
+                    "sqlbot_system": False,
+                }
+                for m in history
+                if m.get("content")
+            ]
+
         # 3. Build prompt using SQLBot templates
         t2 = time.time()
         system_prompt, user_prompt = build_sql_generation_prompt(
@@ -164,22 +204,30 @@ class SQLGenerator:
             terminologies=terminologies,
             data_training=data_training,
             custom_prompt=custom_prompt,
-            error_msg="",
+            error_msg=prev_error,
             need_title=need_title,
         )
         add_step("prompt", "构建提示词", t2)
 
+        system_blocks = [make_log_message("system", system_prompt, sqlbot_system=True)]
+
         # 4. Call LLM
         t3 = time.time()
         try:
-            messages = build_chat_messages(system_prompt, user_prompt)
+            messages = build_chat_messages(system_prompt, user_prompt, history=history)
             raw_response = self.llm.chat(messages)
             logger.info(f"LLM raw response length: {len(raw_response)}")
             logger.info(f"LLM raw response: {raw_response[:1000]}")
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
             add_step("llm", "调用大模型", t3, status="error", detail=str(e))
-            return fail(f"LLM call failed: {str(e)}")
+            log_messages = build_turn_log_messages(
+                system_blocks=system_blocks,
+                history=windowed_raw,
+                human_content=user_prompt,
+                ai_content=str(e),
+            )
+            return fail(f"LLM call failed: {str(e)}", log_messages=log_messages)
 
         reasoning = extract_reasoning(raw_response)
         add_step(
@@ -196,23 +244,39 @@ class SQLGenerator:
             except Exception as cb_err:
                 logger.warning(f"reasoning_callback raised: {cb_err}")
 
+        log_messages = build_turn_log_messages(
+            system_blocks=system_blocks,
+            history=windowed_raw,
+            human_content=user_prompt,
+            ai_content=raw_response,
+        )
+
         # 5. Parse LLM response using SQLBot-style JSON parsing
         t4 = time.time()
         parse_result = parse_llm_sql_response(raw_response)
         if not parse_result.get("success", False):
             add_step("parse", "解析模型输出", t4, status="error",
                      detail=parse_result.get("message", "解析失败"))
-            return fail(parse_result.get("message", "Failed to generate SQL"),
-                        reasoning=reasoning)
+            return fail(
+                parse_result.get("message", "Failed to generate SQL"),
+                reasoning=reasoning,
+                log_messages=log_messages,
+            )
         add_step("parse", "解析模型输出", t4)
 
         # 6. Extract and validate SQL
         t5 = time.time()
         sql = extract_sql(parse_result.get("sql", ""))
-        is_valid, error_msg = validate_sql(sql)
+        is_valid, validate_err = validate_sql(sql)
         if not is_valid:
-            add_step("validate", "校验 SQL", t5, status="error", detail=error_msg)
-            return fail(error_msg, sql=sql, parse_result=parse_result, reasoning=reasoning)
+            add_step("validate", "校验 SQL", t5, status="error", detail=validate_err)
+            return fail(
+                validate_err,
+                sql=sql,
+                parse_result=parse_result,
+                reasoning=reasoning,
+                log_messages=log_messages,
+            )
         add_step("validate", "校验 SQL 安全性", t5)
 
         # 7. Format SQL
@@ -230,6 +294,7 @@ class SQLGenerator:
             "brief": parse_result.get("brief", ""),
             "reasoning": reasoning,
             "steps": steps,
+            "log_messages": log_messages,
         }
 
     def generate_sql_with_retry(

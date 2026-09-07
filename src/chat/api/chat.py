@@ -857,6 +857,7 @@ async def chat_stream(
             queue.put_nowait(sentinel)
 
     def run_legacy_pipeline() -> None:
+        from src.chat.service.message_history import persist_generate_sql_log
         from src.common.core.database import get_db_session
         from src.common.utils.aes import decrypt_conf
         from src.datasource.crud import crud_datasource
@@ -872,6 +873,7 @@ async def chat_stream(
         reasoning_text = ""
         record_id = 0
         uid = current_user_id
+        persist_q = chat_request.question
         try:
             from src.agent.adapter.llm_adapter import LangChainLlmClient
             from src.chat.service.clarification_gate import maybe_clarify_turn
@@ -934,11 +936,24 @@ async def chat_stream(
                     step_callback=on_step,
                     reasoning_callback=on_reasoning,
                     user_id=uid,
+                    conversation_id=chat_request.conversation_id,
                     **gen_kwargs,
                 )
 
                 steps_acc = list(result.get("steps", steps_acc))
                 reasoning_text = result.get("reasoning", reasoning_text) or reasoning_text
+                log_messages = list(result.get("log_messages") or [])
+
+                def _save_log(rid: int, *, error: bool) -> None:
+                    if not chat_request.conversation_id or not log_messages:
+                        return
+                    persist_generate_sql_log(
+                        conversation_id=int(chat_request.conversation_id),
+                        record_id=rid or None,
+                        messages=log_messages,
+                        reasoning_content=reasoning_text or None,
+                        error=error,
+                    )
 
                 if not result["is_valid"]:
                     record_id = _persist_record(
@@ -956,6 +971,7 @@ async def chat_stream(
                         workspace_oid=workspace_oid,
                         agent_mode="legacy",
                     )
+                    _save_log(record_id, error=True)
                     push("error", {"error": result["error"]})
                     return
 
@@ -1013,6 +1029,7 @@ async def chat_stream(
                         workspace_oid=workspace_oid,
                         agent_mode="legacy",
                     )
+                    _save_log(record_id, error=True)
                     push("error", {"error": col_perm_err})
                     return
 
@@ -1060,6 +1077,7 @@ async def chat_stream(
                     workspace_oid=workspace_oid,
                     agent_mode="legacy",
                 )
+                _save_log(record_id, error=not success)
 
                 if not success:
                     push("error", {"error": message})

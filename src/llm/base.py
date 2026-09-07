@@ -1,9 +1,8 @@
 """LangChain-based LLM module."""
 
-from typing import Any, Dict, List, Optional
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
-from langchain_core.outputs import ChatResult
-from langchain_core.callbacks import CallbackManagerForLLMRun
+from typing import Dict, List, Optional
+
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from src.common.core.config import get_settings
 
@@ -21,7 +20,7 @@ def get_langchain_messages(
     Args:
         system_prompt: System prompt
         user_prompt: User prompt
-        history: Optional conversation history [{"role": "user", "content": "..."}]
+        history: Optional conversation history [{"role": "user"|"assistant", "content": "..."}]
 
     Returns:
         List of LangChain messages
@@ -31,10 +30,12 @@ def get_langchain_messages(
         for msg in history:
             role = msg.get("role", "user")
             content = msg.get("content", "")
-            if role == "user":
-                messages.append(HumanMessage(content=content))
-            else:
+            if role in ("assistant", "ai"):
+                messages.append(AIMessage(content=content))
+            elif role == "system":
                 messages.append(SystemMessage(content=content))
+            else:
+                messages.append(HumanMessage(content=content))
     messages.append(HumanMessage(content=user_prompt))
     return messages
 

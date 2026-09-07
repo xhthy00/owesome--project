@@ -81,7 +81,6 @@ SUMMARIZER_DESC = """[角色]
 [输入]
 用户问题：{{question}}
 作答模式：{{answer_mode}}
-近几轮（仅理解指代，数字以本轮子任务为准）：{{conversation_brief}}
 
 子任务执行详情（按顺序）：
 {{sub_tasks_block}}
@@ -129,8 +128,6 @@ class SummarizerAgent(ConversableAgent):
         if mode not in {"fact", "report"}:
             mode = "report"
         base["answer_mode"] = mode
-        brief = str(base.get("conversation_brief") or "").strip()
-        base["conversation_brief"] = brief or "（无）"
         base["writing_brief"] = (
             _FACT_WRITING_BRIEF if mode == "fact" else _REPORT_WRITING_BRIEF
         )

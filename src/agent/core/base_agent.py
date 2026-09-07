@@ -176,6 +176,17 @@ class ConversableAgent:
         system = self.profile.render_system_prompt(self._build_prompt_variables(reply))
         messages: list[dict[str, str]] = [{"role": "system", "content": system}]
 
+        # SQLBot-style: inject windowed conversation history after system prompt
+        ctx = reply.context if isinstance(reply.context, dict) else {}
+        hist = ctx.get("conversation_history")
+        if not hist and isinstance(ctx.get("constraints"), dict):
+            hist = ctx["constraints"].get("conversation_history")
+        if isinstance(hist, list):
+            from src.chat.service.message_history import to_role_dicts
+
+            for item in to_role_dicts(hist):
+                messages.append(item)
+
         for m in rely_messages:
             if m.content:
                 messages.append({"role": m.role or "user", "content": m.content})

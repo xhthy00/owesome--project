@@ -1,13 +1,18 @@
 """Chat CRUD operations for conversation management."""
 
 from datetime import datetime
-from typing import List, Optional, Any
 import json
+from typing import Any, List, Optional
 
 from sqlalchemy import and_, desc
 from sqlmodel import Session, select
 
-from src.chat.models.conversation import Conversation, ConversationRecord
+from src.chat.models.conversation import (
+    OPERATE_GENERATE_SQL,
+    Conversation,
+    ConversationLog,
+    ConversationRecord,
+)
 
 #: 分析工具「保存到报告历史」写入的会话标题前缀；此类会话不进入聊天历史列表。
 ANALYSIS_REPORT_TITLE_PREFIX = "[分析工具]"
@@ -366,7 +371,7 @@ def get_latest_conversation_record(
     conversation_id: int,
     user_id: int,
 ) -> Optional[ConversationRecord]:
-    """最新一条会话记录（含 exec_result），供追问闸门读取 pending。"""
+    """最新一条会话记录（含 exec_result）。"""
     statement = (
         select(ConversationRecord)
         .where(
@@ -416,6 +421,87 @@ def list_conversation_turns_for_context(
     rows = list(session.exec(statement).all())
     rows.reverse()
     return rows
+
+
+def start_conversation_log(
+    session: Session,
+    *,
+    conversation_id: int,
+    pid: Optional[int] = None,
+    operate: str = OPERATE_GENERATE_SQL,
+    messages: Optional[list[dict[str, Any]]] = None,
+    ai_model_name: Optional[str] = None,
+) -> ConversationLog:
+    """Create a chat_log row at LLM call start (SQLBot start_log)."""
+    log = ConversationLog(
+        operate=operate,
+        pid=pid,
+        conversation_id=conversation_id,
+        messages=messages,
+        ai_model_name=ai_model_name,
+        start_time=datetime.now(),
+        error=False,
+    )
+    session.add(log)
+    session.commit()
+    session.refresh(log)
+    return log
+
+
+def end_conversation_log(
+    session: Session,
+    log: ConversationLog,
+    *,
+    messages: Optional[list[dict[str, Any]]] = None,
+    reasoning_content: Optional[str] = None,
+    token_usage: Optional[dict[str, Any]] = None,
+    error: bool = False,
+) -> ConversationLog:
+    """Finalize chat_log with full messages (SQLBot end_log)."""
+    if messages is not None:
+        log.messages = messages
+    if token_usage is not None:
+        log.token_usage = token_usage
+    log.finish_time = datetime.now()
+    log.error = bool(error)
+    if reasoning_content and reasoning_content.strip():
+        log.reasoning_content = reasoning_content.strip()
+    session.add(log)
+    session.commit()
+    session.refresh(log)
+    return log
+
+
+def list_generate_sql_logs(session: Session, conversation_id: int) -> List[ConversationLog]:
+    """All GENERATE_SQL logs for a conversation, ordered by start_time ascending."""
+    statement = (
+        select(ConversationLog)
+        .where(
+            and_(
+                ConversationLog.conversation_id == conversation_id,
+                ConversationLog.operate == OPERATE_GENERATE_SQL,
+            )
+        )
+        .order_by(ConversationLog.start_time)
+    )
+    return list(session.exec(statement).all())
+
+
+def get_last_execute_sql_error(session: Session, conversation_id: int) -> Optional[str]:
+    """Latest non-empty sql_error on conversation records (SQLBot last exec error)."""
+    statement = (
+        select(ConversationRecord.sql_error)
+        .where(
+            and_(
+                ConversationRecord.conversation_id == conversation_id,
+                ConversationRecord.sql_error.isnot(None),
+                ConversationRecord.sql_error != "",
+            )
+        )
+        .order_by(desc(ConversationRecord.create_time))
+        .limit(1)
+    )
+    return session.exec(statement).first()
 
 
 def get_recent_questions(session: Session, datasource_id: int, user_id: int, limit: int = 10) -> List[str]:

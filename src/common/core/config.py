@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     # Team 模式编排：``legacy`` 为手写协程；``langgraph`` 为 LangGraph StateGraph（默认）。
     team_orchestrator: Literal["legacy", "langgraph"] = "langgraph"
 
+    # 多轮对话：按用户提问轮数截取 chat_log 历史（对齐 SQLBot GENERATE_SQL_QUERY_HISTORY_ROUND_COUNT）
+    generate_sql_query_history_round_count: int = 3
+
+
 
 @lru_cache
 def get_settings() -> Settings:

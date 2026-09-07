@@ -21,13 +21,46 @@ SLOT_SUBJECT = "subject_name"
 SLOT_SCHOOL = "school_name"
 SLOT_SCOPE = "scope"
 
-_GENERIC_EXAM_TOKENS = frozenset({"期中", "期末", "月考", "摸底", "模拟", "单元测验"})
+_GENERIC_EXAM_TOKENS = frozenset(
+    {
+        "期中",
+        "期末",
+        "月考",
+        "摸底",
+        "模拟",
+        "单元测验",
+        "期中考试",
+        "期末考试",
+        "月考考试",
+        "模考",
+        "联考",
+        "统考",
+    }
+)
 _SCOPE_OPTIONS = ["全市", "全校", "指定班级"]
 _SCOPE_MARKERS = ("全市", "全校", "各班", "各班级", "本校", "我校")
-_VAGUE_OVERALL_HINTS = ("整体情况", "整体", "分析一下", "情况如何", "考得怎么样")
+_VAGUE_OVERALL_HINTS = (
+    "整体情况",
+    "整体",
+    "分析一下",
+    "情况如何",
+    "考得怎么样",
+    "看一下成绩",
+    "看看成绩",
+    "看下成绩",
+    "出份报告",
+    "出个报告",
+    "生成报告",
+    "学情",
+    "考情",
+    "成绩怎么样",
+    "分析成绩",
+    "帮我看看",
+    "帮我分析",
+)
 _NEW_QUESTION_HINTS = ("报告", "分析", "总览", "诊断", "预警", "画像")
 _NEW_QUESTION_SWITCH = ("另外", "换一个", "不要这个", "新的问题", "重新问")
-_HARD_SLOTS = frozenset({SLOT_EXAM, SLOT_CLASS, SLOT_SCOPE})
+_HARD_SLOTS = frozenset({SLOT_EXAM, SLOT_CLASS, SLOT_SCOPE, SLOT_SCHOOL, SLOT_SUBJECT, SLOT_STUDENT})
 _BUREAU_TYPES = frozenset(
     {
         ReportType.LINE_REACH,
@@ -46,14 +79,39 @@ _CLASS_REQUIRED_TYPES = frozenset(
         ReportType.CLASS_OVERVIEW,
         ReportType.TIER_ALERT,
         ReportType.COMPREHENSIVE,
+        ReportType.GROUP_FEATURE,
     }
 )
 _SUBJECT_REQUIRED_TYPES = frozenset(
     {
         ReportType.SUBJECT_DIAGNOSIS,
         ReportType.DIFFICULTY_CURVE,
+        ReportType.SUBJECT_RESEARCH,
     }
 )
+
+#: 报告类型 → 必填槽（规则矩阵，少漏判优先）
+REQUIRED_SLOTS_BY_REPORT: dict[ReportType, tuple[str, ...]] = {
+    ReportType.CLASS_OVERVIEW: (SLOT_EXAM, SLOT_CLASS),
+    ReportType.GRADE_COMPARISON: (SLOT_EXAM,),
+    ReportType.SUBJECT_DIAGNOSIS: (SLOT_EXAM, SLOT_SUBJECT, SLOT_CLASS),
+    ReportType.STUDENT_PROFILE: (SLOT_STUDENT,),
+    ReportType.TREND_TRACKING: (SLOT_EXAM,),
+    ReportType.TIER_ALERT: (SLOT_EXAM, SLOT_CLASS),
+    ReportType.GROUP_FEATURE: (SLOT_EXAM, SLOT_CLASS),
+    ReportType.COMPREHENSIVE: (SLOT_EXAM, SLOT_CLASS),
+    ReportType.DIAGNOSTIC_REPORT: (SLOT_EXAM,),
+    ReportType.LINE_REACH: (SLOT_EXAM,),
+    ReportType.SUBJECT_AVG: (SLOT_EXAM,),
+    ReportType.ASSIGN_GRADE: (SLOT_EXAM,),
+    ReportType.RANK_BUCKET: (SLOT_EXAM,),
+    ReportType.CONTRIBUTION: (SLOT_EXAM,),
+    ReportType.COMBO_REACH: (SLOT_EXAM,),
+    ReportType.ELITE_ROSTER: (SLOT_EXAM,),
+    ReportType.SCORE_BAND: (SLOT_EXAM,),
+    ReportType.SUBJECT_RESEARCH: (SLOT_EXAM, SLOT_SUBJECT, SLOT_SCHOOL),
+    ReportType.DIFFICULTY_CURVE: (SLOT_EXAM, SLOT_SUBJECT),
+}
 _PROMPT_BY_SLOT = {
     SLOT_SCOPE: "请确认分析范围：全市、全校，还是某个班级？",
     SLOT_EXAM: "要继续分析需要确认考试名称。请直接回复考试专名（不要回复「本次考试」）。",
@@ -205,11 +263,19 @@ def _exam_needed(question: str, route: Any) -> bool:
 
 
 def _first_hard_slot(candidates: list[str]) -> str | None:
-    """exam/class/scope 必须追问，LLM 不能否决。"""
-    for slot in candidates:
-        if slot in _HARD_SLOTS:
+    """按优先级取硬槽；候选非空时规则必追问，LLM 不能否决。"""
+    priority = (
+        SLOT_EXAM,
+        SLOT_SCOPE,
+        SLOT_CLASS,
+        SLOT_SCHOOL,
+        SLOT_SUBJECT,
+        SLOT_STUDENT,
+    )
+    for slot in priority:
+        if slot in candidates:
             return slot
-    return None
+    return candidates[0] if candidates else None
 
 
 def _has_wide_scope(question: str) -> bool:
@@ -333,7 +399,10 @@ def candidate_missing_slots(
     filled: Mapping[str, str],
     edu_scope: Mapping[str, Any] | None = None,
 ) -> list[str]:
-    """若不问就可能猜错的槽，按优先级去重。"""
+    """若不问就可能猜错的槽，按优先级去重。
+
+    优先走报告类型必填矩阵，再叠加模糊整体 / 事实问启发式。
+    """
     from src.agent.education.query_parse import (
         has_class_alias,
         is_bureau_report_query,
@@ -356,11 +425,38 @@ def candidate_missing_slots(
     out: list[str] = []
 
     def add(slot: str) -> None:
-        if slot and slot not in out:
+        if slot and slot not in out and not filled_map.get(slot):
             out.append(slot)
 
-    if is_vague_overall_query(q) and not needs:
-        add(SLOT_SCOPE)
+    def slot_filled(slot: str) -> bool:
+        if slot == SLOT_EXAM:
+            return not _exam_missing(q, filled_map)
+        return bool(str(filled_map.get(slot) or "").strip())
+
+    # 1) 报告类型矩阵（主路径，少漏判）
+    if rt is not None:
+        for slot in REQUIRED_SLOTS_BY_REPORT.get(rt, ()):
+            if slot == SLOT_EXAM:
+                if _exam_missing(q, filled_map):
+                    add(SLOT_EXAM)
+            elif not slot_filled(slot):
+                add(slot)
+        # 班报告未绑校且问句有班：防同名班
+        if (
+            SLOT_CLASS in REQUIRED_SLOTS_BY_REPORT.get(rt, ())
+            and filled_map.get(SLOT_CLASS)
+            and not filled_map.get(SLOT_SCHOOL)
+        ):
+            bound = _bound_school(edu)
+            if not bound or role not in ("teacher", "school_admin", "student"):
+                add(SLOT_SCHOOL)
+
+    # 2) 模糊整体：未给范围时追问 scope（报告题仍强制考试）
+    if is_vague_overall_query(q) and not filled_map.get(SLOT_SCOPE) and not _has_wide_scope(q):
+        if not needs and rt is None:
+            add(SLOT_SCOPE)
+        if _exam_missing(q, filled_map):
+            add(SLOT_EXAM)
 
     skip_class = bool(
         rt in _BUREAU_TYPES
@@ -371,49 +467,66 @@ def candidate_missing_slots(
         or _has_wide_scope(q)
     )
 
-    exam_needed = _exam_needed(q, route)
-    if exam_needed and _exam_missing(q, filled_map):
-        add(SLOT_EXAM)
+    # 3) 无路由时的事实启发式
+    if rt is None:
+        exam_needed = _exam_needed(q, route)
+        if exam_needed and _exam_missing(q, filled_map):
+            add(SLOT_EXAM)
 
-    fact_needs_class = (
-        not skip_class
-        and not filled_map.get(SLOT_CLASS)
-        and (
-            is_score_stat_query(q)
-            or is_oral_score_inquiry(q)
-            or is_line_reach_query(q)
-            or is_subject_strength_query(q)
-            or has_class_alias(q)
+        bound_classes = _unique_bound_classes(edu)
+        fact_needs_class = (
+            not skip_class
+            and not filled_map.get(SLOT_CLASS)
+            and (
+                is_score_stat_query(q)
+                or is_oral_score_inquiry(q)
+                or is_line_reach_query(q)
+                or is_subject_strength_query(q)
+                or has_class_alias(q)
+                or is_vague_overall_query(q)
+            )
+            and (
+                has_class_alias(q)
+                or (role == "teacher" and len(bound_classes) != 1)
+                or role in ("bureau_admin", "platform_admin", "")
+                or role == "school_admin"
+            )
         )
-        and (
-            has_class_alias(q)
-            or (role == "teacher" and len(_unique_bound_classes(edu)) > 1)
+        class_needed = (
+            is_class_weak_subject_query(q)
+            or fact_needs_class
         )
-    )
-    class_needed = (
-        rt in _CLASS_REQUIRED_TYPES
-        or (rt is None and is_class_weak_subject_query(q))
-        or fact_needs_class
-    )
-    if class_needed and not skip_class and not filled_map.get(SLOT_CLASS):
-        add(SLOT_CLASS)
+        if class_needed and not skip_class and not filled_map.get(SLOT_CLASS):
+            # 老师只绑 1 班：静默继承，不追问
+            if not (role == "teacher" and len(bound_classes) == 1):
+                add(SLOT_CLASS)
 
-    if rt == ReportType.STUDENT_PROFILE and not filled_map.get(SLOT_STUDENT):
-        add(SLOT_STUDENT)
+        if class_needed and not skip_class and not filled_map.get(SLOT_SCHOOL):
+            bound = _bound_school(edu)
+            if not bound or role not in ("teacher", "school_admin", "student"):
+                add(SLOT_SCHOOL)
+
+        research = is_subject_research_report_query(q)
+        if research and not filled_map.get(SLOT_SCHOOL):
+            bound = _bound_school(edu)
+            if not bound or role not in ("teacher", "school_admin"):
+                add(SLOT_SCHOOL)
+        if research and not filled_map.get(SLOT_SUBJECT):
+            add(SLOT_SUBJECT)
+
+    # 4) 有路由时的班级补充（矩阵未覆盖的别名场景）
+    if rt is not None and not skip_class and not filled_map.get(SLOT_CLASS):
+        if has_class_alias(q) or (
+            role == "teacher" and len(_unique_bound_classes(edu)) > 1 and rt in _CLASS_REQUIRED_TYPES
+        ):
+            if not (role == "teacher" and len(_unique_bound_classes(edu)) == 1):
+                add(SLOT_CLASS)
 
     if rt in _SUBJECT_REQUIRED_TYPES and not filled_map.get(SLOT_SUBJECT):
         add(SLOT_SUBJECT)
 
-    research = rt == ReportType.SUBJECT_RESEARCH or is_subject_research_report_query(q)
-    if research and not filled_map.get(SLOT_SCHOOL):
-        bound = _bound_school(edu)
-        if not bound or role not in ("teacher", "school_admin"):
-            add(SLOT_SCHOOL)
-
-    if class_needed and not skip_class and not filled_map.get(SLOT_SCHOOL):
-        bound = _bound_school(edu)
-        if not bound or role not in ("teacher", "school_admin", "student"):
-            add(SLOT_SCHOOL)
+    if rt == ReportType.STUDENT_PROFILE and not filled_map.get(SLOT_STUDENT):
+        add(SLOT_STUDENT)
 
     return out
 
@@ -496,6 +609,51 @@ def build_judge_messages(
     ]
 
 
+_PROMPT_POLISH_SYSTEM = (
+    "你是教育学情追问文案助手。系统已决定必须追问某个槽位，你只负责把追问写成一句自然中文。\n"
+    "只输出一句中文追问，不要 JSON、不要解释、不要否认追问必要性。\n"
+    "不要编造不在已填槽/选项里的学校、班级、考试专名。"
+)
+
+
+async def _polish_prompt(
+    *,
+    slot: str,
+    default_prompt: str,
+    question: str,
+    filled: Mapping[str, str],
+    chat_fn: ChatFn,
+) -> str:
+    label = _SLOT_LABEL.get(slot, slot)
+    filled_txt = ", ".join(f"{k}={v}" for k, v in filled.items()) or "无"
+    messages = [
+        {"role": "system", "content": _PROMPT_POLISH_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"用户原问：{question}\n"
+                f"必须追问槽位：{slot}（{label}）\n"
+                f"已填槽：{filled_txt}\n"
+                f"默认文案：{default_prompt}\n"
+                "请输出最终一句追问："
+            ),
+        },
+    ]
+    raw = (await chat_fn(messages) or "").strip()
+    # 去掉可能的引号/JSON 外壳
+    if raw.startswith("{") and "prompt" in raw:
+        try:
+            parsed = parse_json_tolerant(raw)
+            if isinstance(parsed, dict) and parsed.get("prompt"):
+                raw = str(parsed["prompt"]).strip()
+        except Exception:  # noqa: BLE001
+            pass
+    raw = raw.strip().strip('"').strip("'")
+    if not raw or len(raw) > 120:
+        return default_prompt
+    return raw
+
+
 async def judge_clarification(
     question: str,
     *,
@@ -506,58 +664,48 @@ async def judge_clarification(
     chat_fn: ChatFn | None = None,
     options_by_slot: Mapping[str, list[str]] | None = None,
 ) -> ClarificationNeed | None:
-    """判定是否追问。候选为空则放行；LLM 失败回落规则。"""
+    """规则决定是否追问；LLM 仅润色文案，不能取消追问。
+
+    候选非空时必返回 ClarificationNeed（硬槽优先）。
+    """
     filled_map = dict(filled or extract_filled_slots(question, edu_scope))
-    cand = list(candidates if candidates is not None else candidate_missing_slots(
-        route, question, filled_map, edu_scope
-    ))
+    cand = list(
+        candidates
+        if candidates is not None
+        else candidate_missing_slots(route, question, filled_map, edu_scope)
+    )
     rt = _route_type(route)
     rt_value = rt.value if rt else None
     if not cand:
         return None
 
-    def _need_for(slot: str, prompt: str) -> ClarificationNeed:
-        opts: list[str] = []
-        if options_by_slot and slot in options_by_slot:
-            opts = list(options_by_slot.get(slot) or [])
-        elif slot == SLOT_SCOPE:
-            opts = list(_SCOPE_OPTIONS)
-        return ClarificationNeed(
-            prompt=prompt,
-            missing=[slot],
-            options=opts,
-            filled=filled_map,
-            original_question=question,
-            report_type=rt_value,
-        )
-
-    if chat_fn is None:
-        return fallback_clarification(question, cand, filled_map, report_type=rt_value)
-
-    messages = build_judge_messages(
-        question,
-        needs_report=_needs_report(route),
-        report_type=rt_value,
-        filled=filled_map,
-        candidates=cand,
-        edu_scope=edu_scope,
-    )
-    try:
-        raw = await chat_fn(messages)
-        need, slot, prompt = _parse_judge(raw, cand)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("clarification judge failed, fallback rules: %s", exc)
-        return fallback_clarification(question, cand, filled_map, report_type=rt_value)
-    if not need or not slot:
-        hard = _first_hard_slot(cand)
-        if hard:
-            return fallback_clarification(
-                question, [hard], filled_map, report_type=rt_value
+    slot = _first_hard_slot(cand) or cand[0]
+    opts: list[str] = []
+    if options_by_slot and slot in options_by_slot:
+        opts = list(options_by_slot.get(slot) or [])
+    elif slot == SLOT_SCOPE:
+        opts = list(_SCOPE_OPTIONS)
+    prompt = _prompt_for_slot(slot, filled_map)
+    if chat_fn is not None:
+        try:
+            prompt = await _polish_prompt(
+                slot=slot,
+                default_prompt=prompt,
+                question=question,
+                filled=filled_map,
+                chat_fn=chat_fn,
             )
-        return None
-    if not prompt:
-        prompt = _prompt_for_slot(slot, filled_map)
-    return _need_for(slot, prompt)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("clarification prompt polish failed: %s", exc)
+
+    return ClarificationNeed(
+        prompt=prompt,
+        missing=[slot],
+        options=opts,
+        filled=filled_map,
+        original_question=question,
+        report_type=rt_value,
+    )
 
 
 def _fills_missing(pending: Mapping[str, Any], user_text: str) -> str:
@@ -631,6 +779,7 @@ def parse_pending_clarify(exec_result: Any) -> dict[str, Any] | None:
 
 __all__ = [
     "ClarificationNeed",
+    "REQUIRED_SLOTS_BY_REPORT",
     "SLOT_CLASS",
     "SLOT_EXAM",
     "SLOT_SCHOOL",
