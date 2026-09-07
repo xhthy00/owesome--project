@@ -93,7 +93,7 @@ def list_conversations(
     current_user: UserResponse = Depends(get_current_user),
     workspace_oid: int = Depends(get_workspace_oid),
 ):
-    """List user's conversations."""
+    """List user's conversations（按账号全局可见，暂不按工作空间过滤）。"""
     conversations = chat_crud.list_conversations(
         session=session,
         user_id=current_user.id,
