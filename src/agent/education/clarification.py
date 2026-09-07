@@ -5,14 +5,12 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Mapping
 
 from src.agent.education.report_types import ReportType
 from src.agent.util.json_parser import parse_json_tolerant
 
 logger = logging.getLogger(__name__)
-
-ChatFn = Callable[[list[dict[str, str]]], Awaitable[str]]
 
 SLOT_EXAM = "exam_name"
 SLOT_CLASS = "class_name"
@@ -372,6 +370,61 @@ def extract_filled_slots(
     return filled
 
 
+#: LLM 违反「取不到就留空」约束时最常吐的占位值。
+_INVALID_SLOT_VALUES = frozenset(
+    {
+        "无",
+        "未知",
+        "未提供",
+        "用户未提供",
+        "未指定",
+        "不详",
+        "空",
+        "null",
+        "none",
+        "n/a",
+        "na",
+        "-",
+        "待定",
+        "全部",
+        "所有",
+        "不限",
+    }
+)
+
+
+def sanitize_llm_slots(slots: Mapping[str, Any] | None) -> dict[str, str]:
+    """过滤 LLM 抽出来的槽位值，只留下能直接拿去查库的有效值。
+
+    对应 DB-GPT「无法获取到槽位值则输出空，不要填『用户未提供』这类无效信息」
+    与「只取有效值部分」两条约束——模型不总是遵守，所以这里按规则再兜一层。
+    """
+    from src.agent.education.orchestrator import _extract_subject
+    from src.agent.education.query_parse import (
+        extract_class_target,
+        has_class_alias,
+        is_vague_exam_name,
+    )
+
+    out: dict[str, str] = {}
+    for slot, raw in dict(slots or {}).items():
+        value = str(raw or "").strip().strip("「」\"'")
+        if not value or value.lower() in _INVALID_SLOT_VALUES:
+            continue
+        if slot == SLOT_EXAM and (is_vague_exam_name(value) or value in _GENERIC_EXAM_TOKENS):
+            continue
+        if slot == SLOT_CLASS and has_class_alias(value) and not extract_class_target(value):
+            continue
+        if slot == SLOT_SUBJECT and not _extract_subject(value):
+            continue
+        if slot == SLOT_SCOPE and value not in _SCOPE_OPTIONS:
+            value = _scope_from_text(value)
+            if not value:
+                continue
+        out[slot] = value
+    return out
+
+
 def _supplements_from_text(question: str) -> dict[str, str]:
     out: dict[str, str] = {}
     for m in _SUPPLEMENT_RE.finditer(question or ""):
@@ -404,6 +457,7 @@ def candidate_missing_slots(
     优先走报告类型必填矩阵，再叠加模糊整体 / 事实问启发式。
     """
     from src.agent.education.query_parse import (
+        extract_school_target,
         has_class_alias,
         is_bureau_report_query,
         is_citywide_analysis_query,
@@ -474,8 +528,16 @@ def candidate_missing_slots(
             add(SLOT_EXAM)
 
         bound_classes = _unique_bound_classes(edu)
+        # 问句点名学校 = 用户已给出完整的校级范围。优势学科 / 均分 / 达线这些事实
+        # 口径本来就支持校级（planner 按有无班级分别下发「全市学校排名」或「全市
+        # 班级排名」），此时再追问班级是漏判——「本校的优势学科」不追问，
+        # 「扬大附中的优势学科」却追问，本身也不自洽。
+        # 只看问句：教师/校管的 school_name 可能来自绑定权限而非用户表达，不能当作
+        # 用户主动限定了范围。问句带口语班级线索（我们班/三班）时仍需澄清。
+        school_scoped = bool(extract_school_target(q)) and not has_class_alias(q)
         fact_needs_class = (
             not skip_class
+            and not school_scoped
             and not filled_map.get(SLOT_CLASS)
             and (
                 is_score_stat_query(q)
@@ -609,51 +671,6 @@ def build_judge_messages(
     ]
 
 
-_PROMPT_POLISH_SYSTEM = (
-    "你是教育学情追问文案助手。系统已决定必须追问某个槽位，你只负责把追问写成一句自然中文。\n"
-    "只输出一句中文追问，不要 JSON、不要解释、不要否认追问必要性。\n"
-    "不要编造不在已填槽/选项里的学校、班级、考试专名。"
-)
-
-
-async def _polish_prompt(
-    *,
-    slot: str,
-    default_prompt: str,
-    question: str,
-    filled: Mapping[str, str],
-    chat_fn: ChatFn,
-) -> str:
-    label = _SLOT_LABEL.get(slot, slot)
-    filled_txt = ", ".join(f"{k}={v}" for k, v in filled.items()) or "无"
-    messages = [
-        {"role": "system", "content": _PROMPT_POLISH_SYSTEM},
-        {
-            "role": "user",
-            "content": (
-                f"用户原问：{question}\n"
-                f"必须追问槽位：{slot}（{label}）\n"
-                f"已填槽：{filled_txt}\n"
-                f"默认文案：{default_prompt}\n"
-                "请输出最终一句追问："
-            ),
-        },
-    ]
-    raw = (await chat_fn(messages) or "").strip()
-    # 去掉可能的引号/JSON 外壳
-    if raw.startswith("{") and "prompt" in raw:
-        try:
-            parsed = parse_json_tolerant(raw)
-            if isinstance(parsed, dict) and parsed.get("prompt"):
-                raw = str(parsed["prompt"]).strip()
-        except Exception:  # noqa: BLE001
-            pass
-    raw = raw.strip().strip('"').strip("'")
-    if not raw or len(raw) > 120:
-        return default_prompt
-    return raw
-
-
 async def judge_clarification(
     question: str,
     *,
@@ -661,12 +678,13 @@ async def judge_clarification(
     filled: Mapping[str, str] | None = None,
     candidates: list[str] | None = None,
     edu_scope: Mapping[str, Any] | None = None,
-    chat_fn: ChatFn | None = None,
+    llm_ask_user: str | None = None,
     options_by_slot: Mapping[str, list[str]] | None = None,
 ) -> ClarificationNeed | None:
-    """规则决定是否追问；LLM 仅润色文案，不能取消追问。
+    """规则决定是否追问；追问文案优先用 LLM 意图识别产出的 ``ask_user``。
 
-    候选非空时必返回 ClarificationNeed（硬槽优先）。
+    候选非空时必返回 ClarificationNeed（硬槽优先）——LLM 不能取消追问，
+    这一点与 DB-GPT ``IntentRecognitionAction`` 的空槽循环同构。
     """
     filled_map = dict(filled or extract_filled_slots(question, edu_scope))
     cand = list(
@@ -686,17 +704,9 @@ async def judge_clarification(
     elif slot == SLOT_SCOPE:
         opts = list(_SCOPE_OPTIONS)
     prompt = _prompt_for_slot(slot, filled_map)
-    if chat_fn is not None:
-        try:
-            prompt = await _polish_prompt(
-                slot=slot,
-                default_prompt=prompt,
-                question=question,
-                filled=filled_map,
-                chat_fn=chat_fn,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("clarification prompt polish failed: %s", exc)
+    ask = (llm_ask_user or "").strip().strip('"').strip("'")
+    if ask and len(ask) <= 120:
+        prompt = ask
 
     return ClarificationNeed(
         prompt=prompt,
@@ -794,4 +804,5 @@ __all__ = [
     "judge_clarification",
     "merge_clarification_reply",
     "parse_pending_clarify",
+    "sanitize_llm_slots",
 ]

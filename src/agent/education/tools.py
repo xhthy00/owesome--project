@@ -836,11 +836,16 @@ def fetch_subject_diagnosis_data_tool(
             f"- 班级横向对比小题：{len(item_class_rows)} 行\n"
             f"- 班级横向对比知识点：{len(knowledge_class_rows)} 行\n"
         )
+    if not item_rows and score_values:
+        content += (
+            "无小题明细不影响班级横向对比：已有带班级(bj)字段的成绩行。"
+            "**禁止**手写 execute_sql；禁止 SELECT xx AS class_name；禁止只 GROUP BY xx。\n"
+        )
     content += (
         f"SQL 执行记录：\n{_format_diagnosis_sql_logs(sql_logs)}\n"
-        "下一步：**本步请 terminate**（禁止同子任务渲染报告）。"
+        "下一步：**本步请 terminate**（禁止同子任务渲染报告，禁止手写 overview 聚合 SQL）。"
         "组装留给后续子任务："
-        "科目诊断调 `build_subject_diagnosis_sections_tool(render=true)`；"
+        "科目诊断/班级横向对比调 `build_subject_diagnosis_sections_tool(render=true)`；"
         "全市诊断调 `build_diagnostic_report_data_tool(render=true)`——"
         "工具会自动读取本步 fetch 结果。"
     )
@@ -1881,6 +1886,129 @@ def _parse_score_result(result: dict[str, Any] | None) -> tuple[list[float], flo
     return score_values, full_score, exam_ids, score_rows
 
 
+_OVERVIEW_SCORE_COLS = frozenset(
+    {
+        "yw",
+        "sx",
+        "yy",
+        "wl",
+        "hx",
+        "sw",
+        "zz",
+        "ls",
+        "dl",
+        "hxzh",
+        "swzh",
+        "zzzh",
+        "dlzh",
+    }
+)
+
+
+def _overview_class_score_sql(
+    *,
+    school_name: str,
+    subject_col: str,
+    exam_name: str = "",
+    full_score: float = 150.0,
+) -> str:
+    """学生级 overview：每行一个学生，班级列是 bj，供各班横向对比聚合。"""
+    col = (subject_col or "").strip().lower()
+    if col not in _OVERVIEW_SCORE_COLS:
+        raise ValueError(f"illegal overview subject column: {subject_col}")
+    school = _esc((school_name or "").strip())
+    exam = _esc((exam_name or "").strip())
+    fs = float(full_score) if full_score and full_score > 0 else 150.0
+    exam_pred = f" AND exam_name LIKE '%{exam}%'" if exam else ""
+    return (
+        f"SELECT bj AS class, bj AS class_name, xx AS school_name, exam_name,\n"
+        f"       anon_stu_id AS student_id, dq AS district,\n"
+        f"       {col} AS score, {fs:g} AS exam_score\n"
+        f"FROM tb_score_overview\n"
+        f"WHERE xx LIKE '%{school}%'\n"
+        f"  AND xsxz = '在籍生'\n"
+        f"  AND {col} IS NOT NULL AND {col} > 0\n"
+        f"  AND bj IS NOT NULL AND CAST(bj AS TEXT) <> ''\n"
+        f"{exam_pred}"
+        f"ORDER BY exam_name DESC, bj\n"
+        f"LIMIT 50000"
+    )
+
+
+def _fetch_overview_class_scores(
+    *,
+    datasource_id: int,
+    workspace_oid: int | None,
+    user_id: int | None,
+    school_name: str,
+    subject_name: str,
+    exam_name: str = "",
+) -> dict[str, Any]:
+    """tb_score 为空时，用 overview 学生行回落各班成绩（不聚合学校）。"""
+    from collections import Counter
+
+    from src.agent.education.difficulty_curve import subject_column, subject_full_score
+
+    empty: dict[str, Any] = {
+        "score_rows": [],
+        "score_values": [],
+        "full_score": None,
+        "sql_logs": [],
+    }
+    col = subject_column(subject_name)
+    if not col or not (school_name or "").strip():
+        return empty
+    fs = subject_full_score(subject_name)
+    sql = _overview_class_score_sql(
+        school_name=school_name,
+        subject_col=col,
+        exam_name=exam_name,
+        full_score=fs,
+    )
+    success, msg, result, sql_run = _run_edu_sql(
+        sql,
+        datasource_id=datasource_id,
+        workspace_oid=workspace_oid,
+        user_id=user_id,
+    )
+    row_count = len(result.get("rows") or []) if isinstance(result, dict) else 0
+    sql_logs = [
+        {
+            "phase": "overview_class_fallback",
+            "label": "score_by_class",
+            "success": success,
+            "row_count": row_count,
+            "message": msg if not success else "",
+            "sql_preview": (sql_run or sql)[:600],
+        }
+    ]
+    if not success or not isinstance(result, dict):
+        return {**empty, "sql_logs": sql_logs}
+    rows = _rows_to_dicts(result)
+    names = [
+        str(r.get("exam_name") or "").strip()
+        for r in rows
+        if str(r.get("exam_name") or "").strip()
+    ]
+    if len(set(names)) > 1:
+        primary = Counter(names).most_common(1)[0][0]
+        rows = [
+            r for r in rows if str(r.get("exam_name") or "").strip() == primary
+        ]
+    values: list[float] = []
+    for r in rows:
+        try:
+            values.append(float(r.get("score")))
+        except (TypeError, ValueError):
+            continue
+    return {
+        "score_rows": rows,
+        "score_values": values,
+        "full_score": fs,
+        "sql_logs": sql_logs,
+    }
+
+
 def _fetch_subject_diagnosis_rows(
     *,
     datasource_id: int,
@@ -2135,6 +2263,28 @@ def _fetch_subject_diagnosis_rows(
                 f"知识点 {len(knowledge_class_rows)} 行"
             )
 
+    used_overview_scores = False
+    if want_class_compare and not score_values:
+        ov = _fetch_overview_class_scores(
+            datasource_id=datasource_id,
+            workspace_oid=workspace_oid,
+            user_id=user_id,
+            school_name=school_name,
+            subject_name=subject_name,
+            exam_name=exam_name,
+        )
+        sql_logs.extend(ov.get("sql_logs") or [])
+        if ov.get("score_rows"):
+            score_rows = list(ov["score_rows"])
+            score_values = list(ov["score_values"] or [])
+            full_score = ov.get("full_score") if ov.get("full_score") else full_score
+            used_overview_scores = True
+            warnings.append(
+                "tb_score/小题明细为空，已从 tb_score_overview 按班级(bj)回落各班成绩；"
+                "下一步调 build_subject_diagnosis_sections_tool(render=true)。"
+                "禁止手写 execute_sql，禁止 SELECT xx AS class_name / GROUP BY xx。"
+            )
+
     # 权威 KPI：对最终成绩 WHERE 做无 LIMIT 聚合（行级 score_sql 仍可能被 LIMIT 截断）
     kpi_stats: dict[str, Any] | None = None
     score_rows_incomplete = False
@@ -2146,46 +2296,61 @@ def _fetch_subject_diagnosis_rows(
     )
 
     cfg = load_config()
-    wc = last_score_wc if last_score_wc else score_wc
-    kpi_sql = build_kpi_aggregate_sql(wc, cfg)
-    success, msg, result, sql_run = _run_edu_sql(
-        kpi_sql,
-        datasource_id=datasource_id,
-        workspace_oid=workspace_oid,
-        user_id=user_id,
-    )
-    row_count = len(result.get("rows") or []) if isinstance(result, dict) else 0
-    sql_logs.append(
-        {
-            "phase": "kpi_aggregate",
-            "label": "score_kpi",
-            "success": success,
-            "row_count": row_count,
-            "message": msg if not success else "",
-            "sql_preview": (sql_run or kpi_sql)[:600],
-        }
-    )
-    if success and isinstance(result, dict) and result.get("rows"):
-        cols = result.get("columns") or []
-        kpi_stats = kpi_row_to_stats(dict(zip(cols, result["rows"][0])), cfg)
-    count_sql = build_score_count_sql(wc)
-    ok_c, _, cres, _ = _run_edu_sql(
-        count_sql,
-        datasource_id=datasource_id,
-        workspace_oid=workspace_oid,
-        user_id=user_id,
-    )
-    if ok_c and isinstance(cres, dict) and cres.get("rows"):
-        try:
-            total = int(cres["rows"][0][0])
-            if len(score_rows) < total:
-                score_rows_incomplete = True
-                warnings.append(
-                    f"成绩明细行被截断（{len(score_rows)}/{total}），"
-                    "KPI 以库内聚合为准"
-                )
-        except (TypeError, ValueError, IndexError):
-            pass
+    if used_overview_scores:
+        from src.agent.education.stats import compute_score_stats
+
+        kpi_stats = compute_score_stats(score_values, cfg, full_score)
+        sql_logs.append(
+            {
+                "phase": "kpi_aggregate",
+                "label": "overview_class_scores",
+                "success": True,
+                "row_count": len(score_rows),
+                "message": "",
+                "sql_preview": "tb_score_overview class fallback",
+            }
+        )
+    else:
+        wc = last_score_wc if last_score_wc else score_wc
+        kpi_sql = build_kpi_aggregate_sql(wc, cfg)
+        success, msg, result, sql_run = _run_edu_sql(
+            kpi_sql,
+            datasource_id=datasource_id,
+            workspace_oid=workspace_oid,
+            user_id=user_id,
+        )
+        row_count = len(result.get("rows") or []) if isinstance(result, dict) else 0
+        sql_logs.append(
+            {
+                "phase": "kpi_aggregate",
+                "label": "score_kpi",
+                "success": success,
+                "row_count": row_count,
+                "message": msg if not success else "",
+                "sql_preview": (sql_run or kpi_sql)[:600],
+            }
+        )
+        if success and isinstance(result, dict) and result.get("rows"):
+            cols = result.get("columns") or []
+            kpi_stats = kpi_row_to_stats(dict(zip(cols, result["rows"][0])), cfg)
+        count_sql = build_score_count_sql(wc)
+        ok_c, _, cres, _ = _run_edu_sql(
+            count_sql,
+            datasource_id=datasource_id,
+            workspace_oid=workspace_oid,
+            user_id=user_id,
+        )
+        if ok_c and isinstance(cres, dict) and cres.get("rows"):
+            try:
+                total = int(cres["rows"][0][0])
+                if len(score_rows) < total:
+                    score_rows_incomplete = True
+                    warnings.append(
+                        f"成绩明细行被截断（{len(score_rows)}/{total}），"
+                        "KPI 以库内聚合为准"
+                    )
+            except (TypeError, ValueError, IndexError):
+                pass
 
     return {
         "item_rows": item_rows,

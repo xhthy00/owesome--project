@@ -67,6 +67,14 @@ def test_bind_returns_new_instance_and_preserves_original():
     assert "use_session" in bound
 
 
+def test_with_tools_returns_new_pack_without_mutating_template():
+    template = ToolPack(tools=[add])
+    request_pack = template.with_tools([TerminateTool()])
+
+    assert template.names() == ["add"]
+    assert request_pack.names() == ["add", "terminate"]
+
+
 def test_bindings_override_args():
     """运行时 bindings 必须盖过 LLM args，避免 null/错误上下文冲掉注入值。"""
     pack = ToolPack(tools=[use_session]).bind(session="bound")

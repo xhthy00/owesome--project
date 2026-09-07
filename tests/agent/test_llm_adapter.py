@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
@@ -110,6 +111,61 @@ def test_adapter_handles_list_content_response():
     client = LangChainLlmClient(llm=ListContentModel())
     out = _run(client.chat([{"role": "user", "content": "x"}]))
     assert "part-a" in out and "part-b" in out
+
+
+def test_adapter_normalizes_native_tool_call_from_tool_calls():
+    """网关把工具调用放进 tool_calls、content 只剩残片时，仍要还原成 ReAct JSON。
+
+    这正是线上 ``[TOOL_CALL] {too`` 那类 "无法解析 JSON" 的成因。
+    """
+
+    class NativeToolCallModel:
+        async def ainvoke(self, messages):
+            return AIMessage(
+                content="我需要先查看成绩表结构。 [TOOL_CALL] {too",
+                tool_calls=[
+                    {
+                        "name": "describe_table",
+                        "args": {"table_name": "tb_score"},
+                        "id": "call_1",
+                    }
+                ],
+            )
+
+    client = LangChainLlmClient(llm=NativeToolCallModel())
+    out = json.loads(_run(client.chat([{"role": "user", "content": "x"}])))
+
+    assert out["tool"] == "describe_table"
+    assert out["args"] == {"table_name": "tb_score"}
+    assert "查看成绩表结构" in out["thoughts"]
+
+
+def test_adapter_normalizes_legacy_function_call():
+    """老式 ``additional_kwargs.function_call``（arguments 是 JSON 字符串）同样归一化。"""
+
+    class LegacyFunctionCallModel:
+        async def ainvoke(self, messages):
+            return AIMessage(
+                content="",
+                additional_kwargs={
+                    "function_call": {
+                        "name": "execute_sql",
+                        "arguments": '{"sql": "SELECT 1"}',
+                    }
+                },
+            )
+
+    client = LangChainLlmClient(llm=LegacyFunctionCallModel())
+    out = json.loads(_run(client.chat([{"role": "user", "content": "x"}])))
+
+    assert out == {"tool": "execute_sql", "args": {"sql": "SELECT 1"}}
+
+
+def test_adapter_returns_plain_text_when_no_tool_call():
+    model = FakeChatModel(reply='{"tool": "terminate", "args": {}}')
+    client = LangChainLlmClient(llm=model)
+
+    assert _run(client.chat([{"role": "user", "content": "x"}])) == '{"tool": "terminate", "args": {}}'
 
 
 def test_adapter_lazy_loads_default_llm(monkeypatch):

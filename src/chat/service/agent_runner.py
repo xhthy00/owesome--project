@@ -28,7 +28,9 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from src.agent.adapter.llm_adapter import LangChainLlmClient
+from src.agent.core.action.intent_action import build_intent_action_output
 from src.agent.core.agent import AgentMessage
+from src.agent.education.intent_detect import parse_intent_payload
 from src.agent.education.query_parse import (
     build_edu_aware_constraints,
     extract_upstream_participant_count,
@@ -253,6 +255,10 @@ class _RunConstraints:
     user_utterance: str | None = None
     #: 本轮已对齐的考试/校/班/区县字面量，供 SQL 护栏。
     bound_literals: list[str] | None = None
+    #: 跨请求 Intent WAITING 恢复标记。
+    is_retry_chat: bool = False
+    last_speaker: str | None = None
+    message_round: int = 0
 
     def to_context(self) -> dict[str, Any]:
         ctx: dict[str, Any] = {
@@ -286,6 +292,12 @@ class _RunConstraints:
             ctx["user_utterance"] = self.user_utterance
         if self.bound_literals:
             ctx["bound_literals"] = list(self.bound_literals)
+        if self.is_retry_chat:
+            ctx["is_retry_chat"] = True
+        if self.last_speaker:
+            ctx["last_speaker"] = self.last_speaker
+        if self.message_round:
+            ctx["message_round"] = self.message_round
         return ctx
 
     @classmethod
@@ -317,6 +329,11 @@ class _RunConstraints:
                 if str(x).strip()
             ]
             or None,
+            is_retry_chat=bool(data.get("is_retry_chat")),
+            last_speaker=(
+                str(data["last_speaker"]).strip() if data.get("last_speaker") else None
+            ),
+            message_round=int(data.get("message_round") or 0),
         )
 
 
@@ -363,6 +380,246 @@ def _bind_effective_question(request: ChatRequest, gate: Any) -> None:
     eq = str(getattr(gate, "effective_question", "") or "").strip()
     if eq:
         request.question = eq
+
+
+@dataclass
+class _AgentRunHandle:
+    run_id: int
+    is_retry_chat: bool = False
+    last_speaker: str | None = None
+    message_round: int = 0
+
+
+def _is_explicit_new_question(question: str) -> bool:
+    normalized = str(question or "").strip().lower()
+    return normalized.startswith(
+        ("换个问题", "换一个问题", "新问题", "另外问", "重新提问", "忽略上面")
+    )
+
+
+async def _begin_or_resume_agent_run(
+    *,
+    request: ChatRequest,
+    current_user_id: int,
+    workspace_oid: int,
+    persist: bool,
+) -> _AgentRunHandle | None:
+    """Create a run or resume the latest WAITING run before Intent evaluation."""
+    if not persist or not request.conversation_id or request.agent_mode == "legacy":
+        return None
+    raw_question = request.question
+
+    def _sync() -> _AgentRunHandle:
+        from src.chat.crud.agent_run import (
+            append_agent_message,
+            create_agent_run,
+            get_waiting_agent_run,
+            update_agent_run,
+        )
+        from src.chat.models.agent_run import RUN_COMPLETE, RUN_RUNNING
+        from src.common.core.database import get_db_session
+
+        with get_db_session() as session:
+            waiting = get_waiting_agent_run(
+                session,
+                conversation_id=int(request.conversation_id),
+                user_id=current_user_id,
+                workspace_oid=workspace_oid,
+            )
+            can_resume = bool(
+                waiting
+                and waiting.agent_mode == request.agent_mode
+                and waiting.datasource_id == request.datasource_id
+                and not _is_explicit_new_question(raw_question)
+            )
+            if waiting is not None and not can_resume:
+                update_agent_run(
+                    session,
+                    waiting,
+                    state=RUN_COMPLETE,
+                    clear_pending=True,
+                )
+                waiting = None
+            if waiting is not None:
+                previous_speaker = waiting.last_speaker
+                next_round = int(waiting.message_round or 0) + 1
+                update_agent_run(
+                    session,
+                    waiting,
+                    state=RUN_RUNNING,
+                    retry_count=int(waiting.retry_count or 0) + 1,
+                    message_round=next_round,
+                    last_speaker="user",
+                )
+                append_agent_message(
+                    session,
+                    run_id=int(waiting.id),
+                    round=next_round,
+                    sender="user",
+                    receiver="Intent",
+                    role="user",
+                    content=raw_question,
+                    context={"is_retry_chat": True},
+                )
+                return _AgentRunHandle(
+                    run_id=int(waiting.id),
+                    is_retry_chat=True,
+                    last_speaker=previous_speaker,
+                    message_round=next_round,
+                )
+            run = create_agent_run(
+                session,
+                conversation_id=int(request.conversation_id),
+                user_id=current_user_id,
+                workspace_oid=workspace_oid,
+                datasource_id=request.datasource_id,
+                agent_mode=request.agent_mode,
+            )
+            append_agent_message(
+                session,
+                run_id=int(run.id),
+                round=1,
+                sender="user",
+                receiver="Intent",
+                role="user",
+                content=raw_question,
+            )
+            update_agent_run(
+                session,
+                run,
+                message_round=1,
+                last_speaker="user",
+            )
+            return _AgentRunHandle(run_id=int(run.id), message_round=1)
+
+    return await asyncio.to_thread(_sync)
+
+
+async def _mark_agent_run_waiting(
+    handle: _AgentRunHandle | None,
+    gate: Any,
+) -> None:
+    if handle is None:
+        return
+    payload = dict(getattr(gate, "pending_payload", None) or {})
+    prompt = str(payload.get("prompt") or "")
+    missing = [str(s) for s in (payload.get("missing") or []) if str(s).strip()]
+    # 空槽循环产出 ask_user 信号；缺槽为空时它就不会置位，UserProxy 也就收不到，
+    # 这条链路因此是真判定而非自证。
+    action = build_intent_action_output(
+        parse_intent_payload(payload["intent"]) if payload.get("intent") else None,
+        missing=missing,
+        prompt=prompt,
+        payload=payload,
+    )
+    proxy = UserProxyAgent()
+    proxy.receive(
+        AgentMessage(
+            content=prompt,
+            role="assistant",
+            sender="Intent",
+            action_report=action,
+            context={"pending_payload": payload},
+        )
+    )
+    if not proxy.have_ask_user():
+        logger.warning("Intent run %s has no empty slot; skip WAITING", handle.run_id)
+        return
+
+    def _sync() -> None:
+        from src.chat.crud.agent_run import append_agent_message, get_agent_run, update_agent_run
+        from src.chat.models.agent_run import RUN_WAITING
+        from src.common.core.database import get_db_session
+
+        with get_db_session() as session:
+            run = get_agent_run(session, handle.run_id)
+            if run is None:
+                return
+            next_round = max(handle.message_round, int(run.message_round or 0)) + 1
+            append_agent_message(
+                session,
+                run_id=handle.run_id,
+                round=next_round,
+                sender="Intent",
+                receiver="user",
+                content=prompt,
+                action_report=action.model_dump(mode="json"),
+                context={"pending_payload": payload},
+            )
+            update_agent_run(
+                session,
+                run,
+                state=RUN_WAITING,
+                record_id=int(getattr(gate, "record_id", 0) or 0) or None,
+                last_speaker="Intent",
+                message_round=next_round,
+                pending_payload=payload,
+            )
+
+    await asyncio.to_thread(_sync)
+
+
+async def _finish_agent_run(
+    handle: _AgentRunHandle | None,
+    *,
+    record_id: int = 0,
+    success: bool,
+    cancelled: bool = False,
+) -> None:
+    if handle is None:
+        return
+
+    def _sync() -> None:
+        from src.chat.crud.agent_run import get_agent_run, update_agent_run
+        from src.chat.models.agent_run import RUN_CANCELLED, RUN_COMPLETE, RUN_FAILED
+        from src.common.core.database import get_db_session
+
+        with get_db_session() as session:
+            run = get_agent_run(session, handle.run_id)
+            if run is None:
+                return
+            state = RUN_CANCELLED if cancelled else (RUN_COMPLETE if success else RUN_FAILED)
+            update_agent_run(
+                session,
+                run,
+                state=state,
+                record_id=record_id or None,
+                clear_pending=True,
+            )
+
+    await asyncio.to_thread(_sync)
+
+
+def _make_request_question_tool(
+    *,
+    request: ChatRequest,
+    current_user_id: int,
+    workspace_oid: int,
+    emit: EmitCallback,
+):
+    from src.agent.resource.tool.question import make_question
+    from src.chat.service.question_manager import get_question_manager
+
+    return make_question(
+        emit=emit,
+        question_manager=get_question_manager(),
+        conversation_id=request.conversation_id,
+        user_id=current_user_id,
+        workspace_oid=workspace_oid,
+    )
+
+
+def _build_request_tool_pack(question_tool: Any, **bindings: Any):
+    from src.agent.resource.manager import (
+        DEFAULT_PACK_NAME,
+        get_resource_manager,
+        install_default_resources,
+    )
+
+    manager = get_resource_manager()
+    if not manager.has_pack(DEFAULT_PACK_NAME):
+        install_default_resources()
+    return manager.get_pack(DEFAULT_PACK_NAME).with_tools([question_tool]).bind(**bindings)
 
 
 def _question_for_persist(
@@ -460,6 +717,12 @@ async def run_agent_stream(
     async with usage_tracking(emit):
         if llm_client is None:
             llm_client = LangChainLlmClient()
+        run_handle = await _begin_or_resume_agent_run(
+            request=request,
+            current_user_id=current_user_id,
+            workspace_oid=workspace_oid,
+            persist=persist,
+        )
         gate = await maybe_clarify_turn(
             request=request,
             current_user_id=current_user_id,
@@ -469,12 +732,23 @@ async def run_agent_stream(
             workspace_oid=workspace_oid,
         )
         if gate.halted:
+            await _mark_agent_run_waiting(run_handle, gate)
             return gate.record_id
         _bind_effective_question(request, gate)
         constraints = gate.constraints or _build_shared_constraints(
             request.question, current_user_id
         )
+        if run_handle is not None:
+            constraints.is_retry_chat = run_handle.is_retry_chat
+            constraints.last_speaker = run_handle.last_speaker
+            constraints.message_round = run_handle.message_round
         _attach_conversation_history(constraints, request.conversation_id)
+        question_tool = _make_request_question_tool(
+            request=request,
+            current_user_id=current_user_id,
+            workspace_oid=workspace_oid,
+            emit=emit,
+        )
         phase = await _run_data_analyst_phase(
             request=request,
             current_user_id=current_user_id,
@@ -482,8 +756,10 @@ async def run_agent_stream(
             llm_client=llm_client,
             constraints=constraints,
             workspace_oid=workspace_oid,
+            question_tool=question_tool,
         )
         if phase.fatal_error:
+            await _finish_agent_run(run_handle, success=False)
             return 0
 
         if not phase.terminated:
@@ -507,7 +783,7 @@ async def run_agent_stream(
         if not persist:
             return 0
 
-        return await _persist_async(
+        record_id = await _persist_async(
             request=request,
             current_user_id=current_user_id,
             question=_question_for_persist(request, constraints),
@@ -525,6 +801,12 @@ async def run_agent_stream(
             summary=reconciled or None,
             workspace_oid=workspace_oid,
         )
+        await _finish_agent_run(
+            run_handle,
+            record_id=record_id,
+            success=phase.is_success,
+        )
+        return record_id
 
 
 async def run_team_stream(
@@ -566,6 +848,12 @@ async def run_team_stream(
     async with usage_tracking(emit):
         if llm_client is None:
             llm_client = LangChainLlmClient()
+        run_handle = await _begin_or_resume_agent_run(
+            request=request,
+            current_user_id=current_user_id,
+            workspace_oid=workspace_oid,
+            persist=persist,
+        )
         gate = await maybe_clarify_turn(
             request=request,
             current_user_id=current_user_id,
@@ -575,16 +863,27 @@ async def run_team_stream(
             workspace_oid=workspace_oid,
         )
         if gate.halted:
+            await _mark_agent_run_waiting(run_handle, gate)
             return gate.record_id
         _bind_effective_question(request, gate)
         shared_constraints = gate.constraints or _build_shared_constraints(
             request.question, current_user_id
         )
+        if run_handle is not None:
+            shared_constraints.is_retry_chat = run_handle.is_retry_chat
+            shared_constraints.last_speaker = run_handle.last_speaker
+            shared_constraints.message_round = run_handle.message_round
         _attach_conversation_history(shared_constraints, request.conversation_id)
+        question_tool = _make_request_question_tool(
+            request=request,
+            current_user_id=current_user_id,
+            workspace_oid=workspace_oid,
+            emit=emit,
+        )
         if get_settings().team_orchestrator == "langgraph":
             from src.chat.service.team_graph import run_team_stream_graph
 
-            return await run_team_stream_graph(
+            record_id = await run_team_stream_graph(
                 request=request,
                 current_user_id=current_user_id,
                 emit=emit,
@@ -593,17 +892,26 @@ async def run_team_stream(
                 enable_tool_agent=enable_tool_agent,
                 workspace_oid=workspace_oid,
                 constraints=shared_constraints,
+                question_tool=question_tool,
             )
-        return await _run_team_stream_legacy(
-            request=request,
-            current_user_id=current_user_id,
-            emit=emit,
-            llm_client=llm_client,
-            persist=persist,
-            enable_tool_agent=enable_tool_agent,
-            workspace_oid=workspace_oid,
-            constraints=shared_constraints,
+        else:
+            record_id = await _run_team_stream_legacy(
+                request=request,
+                current_user_id=current_user_id,
+                emit=emit,
+                llm_client=llm_client,
+                persist=persist,
+                enable_tool_agent=enable_tool_agent,
+                workspace_oid=workspace_oid,
+                constraints=shared_constraints,
+                question_tool=question_tool,
+            )
+        await _finish_agent_run(
+            run_handle,
+            record_id=record_id,
+            success=bool(record_id),
         )
+        return record_id
 
 
 async def _run_team_stream_legacy(
@@ -616,6 +924,7 @@ async def _run_team_stream_legacy(
     enable_tool_agent: bool = True,
     workspace_oid: int = 1,
     constraints: _RunConstraints | None = None,
+    question_tool: Any = None,
 ) -> int:
     """Team 模式手写协程实现（``team_orchestrator=legacy``）。"""
     if llm_client is None:
@@ -664,6 +973,7 @@ async def _run_team_stream_legacy(
                 sub_task_index=idx,
                 constraints=shared_constraints,
                 workspace_oid=workspace_oid,
+                question_tool=question_tool,
             )
         else:
             phase = await _run_data_analyst_phase(
@@ -675,6 +985,7 @@ async def _run_team_stream_legacy(
                 sub_task_index=idx,
                 constraints=shared_constraints,
                 workspace_oid=workspace_oid,
+                question_tool=question_tool,
             )
         upstream_report_data["sub_tasks"].append({
             "sub_task_index": idx,
@@ -918,6 +1229,7 @@ async def _run_data_analyst_phase(
     sub_task_index: int | None = None,
     constraints: _RunConstraints | None = None,
     workspace_oid: int = 1,
+    question_tool: Any = None,
 ) -> _DataAnalystPhase:
     """跑一次独立的 DataAnalyst ReAct 循环。
 
@@ -940,12 +1252,22 @@ async def _run_data_analyst_phase(
     if llm_client is None:
         llm_client = LangChainLlmClient()
 
+    tool_pack = None
+    if question_tool is not None:
+        tool_pack = _build_request_tool_pack(
+            question_tool,
+            datasource_id=request.datasource_id,
+            user_id=current_user_id,
+            workspace_oid=workspace_oid,
+            tool_runtime_ctx=state.tool_runtime_ctx,
+        )
     agent = build_data_analyst(
         llm_client=llm_client,
         datasource_id=request.datasource_id,
         user_id=current_user_id,
         workspace_oid=workspace_oid,
         tool_runtime_ctx=state.tool_runtime_ctx,
+        tool_pack=tool_pack,
     )
     agent.stream_callback = _make_forwarder(state, emit)
 
@@ -1039,6 +1361,7 @@ async def _run_tool_expert_phase(
     sub_task_index: int | None = None,
     constraints: _RunConstraints | None = None,
     workspace_oid: int = 1,
+    question_tool: Any = None,
 ) -> _DataAnalystPhase:
     state = _RunState(sub_task_index=sub_task_index, constraints=constraints)
     state.tool_runtime_ctx["datasource_id"] = request.datasource_id
@@ -1068,6 +1391,17 @@ async def _run_tool_expert_phase(
         llm_client = LangChainLlmClient()
 
     question = question_override if question_override is not None else request.question
+    tool_pack = None
+    if question_tool is not None:
+        tool_pack = _build_request_tool_pack(
+            question_tool,
+            datasource_id=request.datasource_id,
+            user_id=current_user_id,
+            workspace_oid=workspace_oid,
+            report_data=constraints.report_data if constraints else None,
+            sub_task=question,
+            tool_runtime_ctx=state.tool_runtime_ctx,
+        )
     agent = build_tool_agent(
         llm_client=llm_client,
         datasource_id=request.datasource_id,
@@ -1076,6 +1410,7 @@ async def _run_tool_expert_phase(
         report_data=constraints.report_data if constraints else None,
         sub_task=question,
         tool_runtime_ctx=state.tool_runtime_ctx,
+        tool_pack=tool_pack,
     )
     agent.stream_callback = _make_forwarder(state, emit)
 

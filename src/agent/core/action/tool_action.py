@@ -185,7 +185,14 @@ def _should_rescue_comprehensive(sub_task: str, ai_message: str) -> bool:
     return _should_rescue_report_tool(sub_task, ai_message) == "build_comprehensive_report_data_tool"
 
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.DOTALL | re.IGNORECASE)
-_TOOL_NAME_RE = re.compile(r"""tool\s*:\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?""", re.IGNORECASE)
+# 同时覆盖裸键 ``tool: name`` 与 JSON 带引号键 ``"tool": "name"``；后者在输出被
+# 截断（如 ``[TOOL_CALL] {"tool": "execute_sql", "args": {"sql": "SELECT``）时是
+# 唯一还能捞回工具名的线索。
+_TOOL_NAME_RE = re.compile(
+    r"""["']?tool["']?\s*:\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?""", re.IGNORECASE
+)
+#: 值得尝试文本兜底解析的标志：模型原生工具标记，或任意形式的 tool 键。
+_TOOL_MARKER_RE = re.compile(r"""\[TOOL_CALL\]|["']?tool["']?\s*:""", re.IGNORECASE)
 _CLI_ARG_RE = re.compile(r"""--([A-Za-z_][A-Za-z0-9_]*)\s+("([^"]*)"|'([^']*)'|([^\s,}\]]+))""")
 _MINIMAX_INVOKE_RE = re.compile(
     r"<invoke\b[^>]*\bname\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</invoke>",
@@ -309,7 +316,7 @@ class ToolAction(Action):
             if minimax is not None:
                 return minimax
             text = str(raw_text or "")
-            if "[TOOL_CALL]" not in text and "tool:" not in text:
+            if not _TOOL_MARKER_RE.search(text):
                 return None
             cleaned = _THINK_BLOCK_RE.sub("", text)
             m_tool = _TOOL_NAME_RE.search(cleaned)

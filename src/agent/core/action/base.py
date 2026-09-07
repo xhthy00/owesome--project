@@ -24,6 +24,7 @@ class ActionOutput(BaseModel):
     next_speakers: list[str] | None = None
     terminate: bool = False
     have_retry: bool = True
+    ask_user: bool = False
     resource_value: str | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
 

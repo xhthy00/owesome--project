@@ -259,14 +259,18 @@ LIMIT 1000;
     AND xsxz = '在籍生'
   GROUP BY xx, bj
   HAVING AVG(sx) FILTER (WHERE sx &gt; 0) IS NOT NULL
+),
+ranked AS (
+  SELECT xx, bj, avg_sx,
+         RANK() OVER (ORDER BY avg_sx DESC) AS city_rank,
+         COUNT(*) OVER () AS n_class
+  FROM class_avg
 )
-SELECT xx, bj, avg_sx,
-       RANK() OVER (ORDER BY avg_sx DESC) AS city_rank,
-       COUNT(*) OVER () AS n_class
-FROM class_avg
+SELECT xx, bj, avg_sx, city_rank, n_class
+FROM ranked
 WHERE xx LIKE '%扬州中学%' AND bj LIKE '%高三(1)班%'
 LIMIT 1000;
--- 全市班级排名必须 xsxz='在籍生'。市报生/往届是虚拟班，计入会把正取班从第1挤到第4。数学=sx 且 FILTER sx&gt;0</suggestion-answer>
+-- 全市班级排名：GROUP BY xx,bj 后 RANK()/COUNT(*) OVER()，禁止 PARTITION BY bj，禁止 COUNT(DISTINCT bj)。目标校/班只在外层过滤，否则窗口函数只剩 1 行。数学=sx 且 FILTER sx&gt;0</suggestion-answer>
   </example>
   <example>
     <question>2026届高三1月新华中学的优势学科</question>
@@ -287,22 +291,64 @@ LIMIT 1000;
   GROUP BY xx
 ),
 ranked AS (
-  SELECT xx, '语文' AS subject, yw AS avg_score, RANK() OVER (ORDER BY yw DESC NULLS LAST) AS city_rank FROM school_avg WHERE yw IS NOT NULL
-  UNION ALL SELECT xx, '数学', sx, RANK() OVER (ORDER BY sx DESC NULLS LAST) FROM school_avg WHERE sx IS NOT NULL
-  UNION ALL SELECT xx, '英语', yy, RANK() OVER (ORDER BY yy DESC NULLS LAST) FROM school_avg WHERE yy IS NOT NULL
-  UNION ALL SELECT xx, '物理', wl, RANK() OVER (ORDER BY wl DESC NULLS LAST) FROM school_avg WHERE wl IS NOT NULL
-  UNION ALL SELECT xx, '历史', ls, RANK() OVER (ORDER BY ls DESC NULLS LAST) FROM school_avg WHERE ls IS NOT NULL
-  UNION ALL SELECT xx, '化学', hxzh, RANK() OVER (ORDER BY hxzh DESC NULLS LAST) FROM school_avg WHERE hxzh IS NOT NULL
-  UNION ALL SELECT xx, '生物', swzh, RANK() OVER (ORDER BY swzh DESC NULLS LAST) FROM school_avg WHERE swzh IS NOT NULL
-  UNION ALL SELECT xx, '政治', zzzh, RANK() OVER (ORDER BY zzzh DESC NULLS LAST) FROM school_avg WHERE zzzh IS NOT NULL
-  UNION ALL SELECT xx, '地理', dlzh, RANK() OVER (ORDER BY dlzh DESC NULLS LAST) FROM school_avg WHERE dlzh IS NOT NULL
+  SELECT xx, '语文' AS subject, yw AS avg_score,
+         RANK() OVER (ORDER BY yw DESC NULLS LAST) AS city_rank,
+         COUNT(*) OVER () AS n_school
+  FROM school_avg WHERE yw IS NOT NULL
+  UNION ALL SELECT xx, '数学', sx, RANK() OVER (ORDER BY sx DESC NULLS LAST), COUNT(*) OVER () FROM school_avg WHERE sx IS NOT NULL
+  UNION ALL SELECT xx, '英语', yy, RANK() OVER (ORDER BY yy DESC NULLS LAST), COUNT(*) OVER () FROM school_avg WHERE yy IS NOT NULL
+  UNION ALL SELECT xx, '物理', wl, RANK() OVER (ORDER BY wl DESC NULLS LAST), COUNT(*) OVER () FROM school_avg WHERE wl IS NOT NULL
+  UNION ALL SELECT xx, '历史', ls, RANK() OVER (ORDER BY ls DESC NULLS LAST), COUNT(*) OVER () FROM school_avg WHERE ls IS NOT NULL
+  UNION ALL SELECT xx, '化学', hxzh, RANK() OVER (ORDER BY hxzh DESC NULLS LAST), COUNT(*) OVER () FROM school_avg WHERE hxzh IS NOT NULL
+  UNION ALL SELECT xx, '生物', swzh, RANK() OVER (ORDER BY swzh DESC NULLS LAST), COUNT(*) OVER () FROM school_avg WHERE swzh IS NOT NULL
+  UNION ALL SELECT xx, '政治', zzzh, RANK() OVER (ORDER BY zzzh DESC NULLS LAST), COUNT(*) OVER () FROM school_avg WHERE zzzh IS NOT NULL
+  UNION ALL SELECT xx, '地理', dlzh, RANK() OVER (ORDER BY dlzh DESC NULLS LAST), COUNT(*) OVER () FROM school_avg WHERE dlzh IS NOT NULL
 )
-SELECT subject, avg_score, city_rank, COUNT(*) OVER (PARTITION BY subject) AS n_school
+SELECT subject, avg_score, city_rank, n_school
 FROM ranked
 WHERE xx LIKE '%新华中学%'
 ORDER BY city_rank, subject
 LIMIT 1000;
--- 优势/薄弱学科=该校各科均分的全市学校排名相对位置：名次/参赛数≤25%为前列（优势），≥50%为靠后（薄弱）。禁止把本校各科里名次较差的直接叫薄弱。禁止用该校语文均分和数学均分互比。点名班级则 GROUP BY xx,bj 做全市班级排名。必须 xsxz='在籍生'，单科 FILTER col&gt;0</suggestion-answer>
+-- 优势/薄弱学科=该校各科均分的全市学校排名相对位置：名次/参赛数≤25%为前列（优势），≥50%为靠后（薄弱）。禁止把本校各科里名次较差的直接叫薄弱。禁止用该校语文均分和数学均分互比。点名班级则 GROUP BY xx,bj 做全市班级排名：RANK() OVER (ORDER BY 均分 DESC)，禁止 PARTITION BY bj，禁止 COUNT(DISTINCT bj)。必须 xsxz='在籍生'，单科 FILTER col&gt;0；化学/生物/政治/地理用 hxzh/swzh/zzzh/dlzh</suggestion-answer>
+  </example>
+  <example>
+    <question>2026届高三1月期末扬州中学高三(5)班优势学科</question>
+    <suggestion-answer>WITH class_avg AS (
+  SELECT xx, bj,
+         ROUND(AVG(yw) FILTER (WHERE yw &gt; 0), 2) AS yw,
+         ROUND(AVG(sx) FILTER (WHERE sx &gt; 0), 2) AS sx,
+         ROUND(AVG(yy) FILTER (WHERE yy &gt; 0), 2) AS yy,
+         ROUND(AVG(wl) FILTER (WHERE wl &gt; 0), 2) AS wl,
+         ROUND(AVG(ls) FILTER (WHERE ls &gt; 0), 2) AS ls,
+         ROUND(AVG(hxzh) FILTER (WHERE hxzh &gt; 0), 2) AS hxzh,
+         ROUND(AVG(swzh) FILTER (WHERE swzh &gt; 0), 2) AS swzh,
+         ROUND(AVG(zzzh) FILTER (WHERE zzzh &gt; 0), 2) AS zzzh,
+         ROUND(AVG(dlzh) FILTER (WHERE dlzh &gt; 0), 2) AS dlzh
+  FROM tb_score_overview
+  WHERE exam_name LIKE '%2026届高三1月期末%'
+    AND xsxz = '在籍生'
+  GROUP BY xx, bj
+),
+ranked AS (
+  SELECT xx, bj, '语文' AS subject, yw AS avg_score,
+         RANK() OVER (ORDER BY yw DESC NULLS LAST) AS city_rank,
+         COUNT(*) OVER () AS n_class
+  FROM class_avg WHERE yw IS NOT NULL
+  UNION ALL SELECT xx, bj, '数学', sx, RANK() OVER (ORDER BY sx DESC NULLS LAST), COUNT(*) OVER () FROM class_avg WHERE sx IS NOT NULL
+  UNION ALL SELECT xx, bj, '英语', yy, RANK() OVER (ORDER BY yy DESC NULLS LAST), COUNT(*) OVER () FROM class_avg WHERE yy IS NOT NULL
+  UNION ALL SELECT xx, bj, '物理', wl, RANK() OVER (ORDER BY wl DESC NULLS LAST), COUNT(*) OVER () FROM class_avg WHERE wl IS NOT NULL
+  UNION ALL SELECT xx, bj, '历史', ls, RANK() OVER (ORDER BY ls DESC NULLS LAST), COUNT(*) OVER () FROM class_avg WHERE ls IS NOT NULL
+  UNION ALL SELECT xx, bj, '化学', hxzh, RANK() OVER (ORDER BY hxzh DESC NULLS LAST), COUNT(*) OVER () FROM class_avg WHERE hxzh IS NOT NULL
+  UNION ALL SELECT xx, bj, '生物', swzh, RANK() OVER (ORDER BY swzh DESC NULLS LAST), COUNT(*) OVER () FROM class_avg WHERE swzh IS NOT NULL
+  UNION ALL SELECT xx, bj, '政治', zzzh, RANK() OVER (ORDER BY zzzh DESC NULLS LAST), COUNT(*) OVER () FROM class_avg WHERE zzzh IS NOT NULL
+  UNION ALL SELECT xx, bj, '地理', dlzh, RANK() OVER (ORDER BY dlzh DESC NULLS LAST), COUNT(*) OVER () FROM class_avg WHERE dlzh IS NOT NULL
+)
+SELECT subject, avg_score, city_rank, n_class
+FROM ranked
+WHERE xx LIKE '%扬州中学%' AND bj LIKE '%高三(5)班%'
+ORDER BY city_rank, subject
+LIMIT 1000;
+-- 班级优势学科=该班各科均分的全市班级排名。RANK/COUNT 必须在未过滤目标班的全集上计算。禁止 PARTITION BY bj，禁止 COUNT(DISTINCT bj)，禁止 hx/sw/zz/dl</suggestion-answer>
   </example>
   <example>
     <question>全市均衡性最好的学科</question>
@@ -543,6 +589,7 @@ _INTENT_EXAMPLE_KEYS: dict[str, tuple[str, ...]] = {
         "全市均衡性最好的学科",
         "2026届高三1月扬州中学高三(1)班数学成绩全市排名",
         "2026届高三1月新华中学的优势学科",
+        "2026届高三1月期末扬州中学高三(5)班优势学科",
         "扬州中学对比引领校语文单科",
         "扬州中学物理类均分与全市",
     ),
@@ -725,7 +772,7 @@ def education_terminologies_block() -> str:
   </terminology>
   <terminology>
     <words><word>排名</word><word>全市排名</word><word>优势学科</word><word>薄弱学科</word><word>在籍</word><word>市报</word><word>往届</word></words>
-    <description>查 tb_score_overview 默认 AND xsxz='在籍生'。市报生/往届不进均分、不进全市班级或学校排名池（否则虚拟市报班会挤占名次）。问句明确要市报/往届/含市报时才放开。班级全市排名：GROUP BY xx,bj 后 RANK()，外层再滤目标班。优势学科/薄弱学科/优势科目/短板学科：按该校（点名班级则该班）各科均分的全市排名相对位置判断，名次/参赛数≤25%为全市前列（优势），≥50%为全市靠后（薄弱），中间为中游；禁止把本校各科里名次较差的直接叫薄弱（第7/37仍属前列）；禁止用本校各科均分互相比较（满分与选考人数不同）</description>
+    <description>查 tb_score_overview 默认 AND xsxz='在籍生'。市报生/往届不进均分、不进全市班级或学校排名池（否则虚拟市报班会挤占名次）。问句明确要市报/往届/含市报时才放开。班级全市排名：GROUP BY xx,bj 后 RANK() OVER (ORDER BY 均分 DESC) 与 COUNT(*) OVER()，外层再滤目标班；禁止 PARTITION BY bj（同名班跨校互比），禁止 COUNT(DISTINCT bj)（班名种类≠全市班级数）。优势学科/薄弱学科/优势科目/短板学科：按该校（点名班级则该班）各科均分的全市排名相对位置判断，名次/参赛数≤25%为全市前列（优势），≥50%为全市靠后（薄弱），中间为中游；禁止把本校各科里名次较差的直接叫薄弱（第7/37仍属前列）；禁止用本校各科均分互相比较（满分与选考人数不同）。化学/生物/政治/地理用 hxzh/swzh/zzzh/dlzh，禁止 hx/sw/zz/dl</description>
   </terminology>
   <terminology>
     <words><word>均分</word><word>各科</word><word>选考</word><word>选课</word><word>历史</word><word>地理</word><word>政治</word><word>均衡</word><word>标准差</word><word>离散</word></words>

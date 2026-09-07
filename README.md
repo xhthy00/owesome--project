@@ -194,6 +194,10 @@ npm run dev
 uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
+> Agentic question 首版使用进程内 `asyncio.Event` 唤醒等待中的 Agent。生产部署必须保持
+> `--workers 1`（或确保同一会话粘滞到同一 worker）；启用多 worker 前需改用 Redis
+> Pub/Sub/Streams 传递 reply/reject 信号。SSE 会每 15 秒发送心跳，问题等待超时为 300 秒。
+
 - 健康检查：`GET http://localhost:8000/health`
 - API 文档：`http://localhost:8000/docs`
 

@@ -117,6 +117,25 @@ export type ClarifyPayload = {
   report_type?: string | null;
 };
 
+export type QuestionOption = {
+  label: string;
+  description?: string;
+};
+
+export type QuestionInfo = {
+  question: string;
+  header?: string;
+  options: QuestionOption[];
+  multiple?: boolean;
+  custom?: boolean;
+};
+
+export type Question = {
+  request_id: string;
+  conv_id: string;
+  questions: QuestionInfo[];
+};
+
 type StreamHandlers = {
   onStep?: (step: { name?: string; label?: string; status?: string; elapsed_ms?: number; detail?: string }) => void;
   onAgentSpeak?: (payload: { agent?: string; status?: string; error?: string }) => void;
@@ -164,6 +183,8 @@ type StreamHandlers = {
   onError?: (msg: string) => void;
   onDone?: (recordId: number) => void;
   onClarify?: (payload: ClarifyPayload) => void;
+  onQuestionAsked?: (payload: Question) => void;
+  onQuestionRejected?: (payload: Pick<Question, "request_id" | "conv_id">) => void;
 };
 
 export async function createConversation(payload: { title?: string; datasource_id: number }) {
@@ -224,6 +245,19 @@ export async function replaceRecordReports(payload: {
       body: JSON.stringify({ reports: payload.reports })
     }
   );
+}
+
+export async function replyQuestion(requestId: string, answers: string[][]) {
+  return apiRequest<{ request_id: string }>(`/chat/question/${requestId}/reply`, {
+    method: "POST",
+    body: JSON.stringify({ answers })
+  });
+}
+
+export async function rejectQuestion(requestId: string) {
+  return apiRequest<{ request_id: string }>(`/chat/question/${requestId}/reject`, {
+    method: "POST"
+  });
 }
 
 export async function sendMessageStream(
@@ -339,6 +373,19 @@ export async function sendMessageStream(
             filled: (data.filled as Record<string, string>) ?? {},
             original_question: (data.original_question as string) ?? "",
             report_type: (data.report_type as string) ?? null
+          });
+          break;
+        case "question.asked":
+          handlers.onQuestionAsked?.({
+            request_id: (data.request_id as string) ?? "",
+            conv_id: (data.conv_id as string) ?? "",
+            questions: Array.isArray(data.questions) ? (data.questions as QuestionInfo[]) : []
+          });
+          break;
+        case "question.rejected":
+          handlers.onQuestionRejected?.({
+            request_id: (data.request_id as string) ?? "",
+            conv_id: (data.conv_id as string) ?? ""
           });
           break;
         case "error":

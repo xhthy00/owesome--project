@@ -1,5 +1,14 @@
 """Chat CRUD module."""
 
+from src.chat.crud.agent_run import (
+    append_agent_message,
+    create_agent_run,
+    get_agent_run,
+    get_last_agent_run,
+    get_waiting_agent_run,
+    list_agent_messages,
+    update_agent_run,
+)
 from src.chat.crud.chat import (
     create_conversation,
     create_conversation_record,
@@ -21,6 +30,13 @@ from src.chat.crud.chat import (
 )
 
 __all__ = [
+    "append_agent_message",
+    "create_agent_run",
+    "get_agent_run",
+    "get_last_agent_run",
+    "get_waiting_agent_run",
+    "list_agent_messages",
+    "update_agent_run",
     "create_conversation",
     "get_conversation_by_id",
     "list_conversations",

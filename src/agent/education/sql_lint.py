@@ -41,6 +41,21 @@ _EQ_LIT = re.compile(
     r"(?:exam_name|district|dq|school_name|s_name|xx|bj|class_name)\s*=\s*'([^']+)'",
     re.IGNORECASE,
 )
+#: 化/生/政/地必须用转换分；AVG(hx) 会命中 hx 而不会误伤 hxzh。
+_RAW_ELECTIVE_STAT = re.compile(
+    r"\b(?:AVG|MEDIAN|MIN|MAX|SUM|STDDEV(?:_SAMP|_POP)?|STDEV(?:_SAMP|_POP)?|"
+    r"VAR(?:_SAMP|_POP)?|VARIANCE)\s*\(\s*(?:[\w]+\.)?(?P<col>hx|sw|zz|dl)\s*\)",
+    re.IGNORECASE,
+)
+_RANK_PARTITION_BY_BJ = re.compile(
+    r"\b(?:RANK|DENSE_RANK|ROW_NUMBER)\s*\(\s*\)\s*OVER\s*\("
+    r"[^)]*PARTITION\s+BY\s+[^)]*\bbj\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_COUNT_DISTINCT_BJ = re.compile(
+    r"COUNT\s*\(\s*DISTINCT\s+(?:[\w]+\.)?bj\s*\)",
+    re.IGNORECASE,
+)
 
 
 def _unbound_literals(sql: str, bound: Sequence[str] | None) -> list[str]:
@@ -91,6 +106,34 @@ def lint_edu_sql_blocks(sql: str, bound_literals: Sequence[str] | None = None) -
             "检测到全市班级/学校排名未排除市报生：tb_score_overview 须 "
             "AND xsxz='在籍生'，否则往届/市报虚拟班会挤占名次。"
         )
+    if _class_rank_partitioned_by_name(s):
+        blocks.append(
+            "检测到 RANK() OVER (PARTITION BY bj)：这是各校同名班互比，不是全市班级排名。"
+            "必须 GROUP BY xx,bj 后 RANK() OVER (ORDER BY 均分 DESC)，禁止 PARTITION BY bj；"
+            "目标校/班只允许在排名完成后再 WHERE 过滤。"
+        )
+    if _count_distinct_class_name_as_city_n(s):
+        blocks.append(
+            "检测到 COUNT(DISTINCT bj)：班名（高三(1)班…）全市重复，这是班名种类不是全市班级数。"
+            "全市班级数用 COUNT(*) OVER ()（对 xx,bj 分组结果），禁止 COUNT(DISTINCT bj)。"
+        )
+    raw_electives = _raw_elective_cols(s)
+    if raw_electives:
+        cols = "、".join(raw_electives)
+        blocks.append(
+            f"检测到对 {cols} 做分数统计：化学/生物/政治/地理必须用转换分 "
+            "hxzh/swzh/zzzh/dlzh，禁止 hx/sw/zz/dl。"
+        )
+    if _school_column_aliased_as_class(s):
+        blocks.append(
+            "检测到把 xx（学校）别名为 class_name/班级：班级横向对比必须用 bj。"
+            "SELECT bj AS class_name，GROUP BY xx, bj；禁止 SELECT xx AS class_name，禁止只 GROUP BY xx。"
+        )
+    if _class_alias_grouped_by_school_only(s):
+        blocks.append(
+            "检测到 SELECT 班级别名却只 GROUP BY xx：会把全校塌成一行学校均分。"
+            "各班对比必须 SELECT bj AS class_name，GROUP BY xx, bj。"
+        )
     unbound = _unbound_literals(s, bound_literals)
     if unbound:
         blocks.append(
@@ -124,6 +167,59 @@ def _overview_rank_missing_enrolled(sql: str) -> bool:
     if not ranked and not by_class:
         return False
     return not _excludes_shibao(s)
+
+
+def _class_rank_partitioned_by_name(sql: str) -> bool:
+    """班级聚合后再按班名分区排名 → 同名班跨校互比。"""
+    s = sql or ""
+    if "tb_score_overview" not in s.lower():
+        return False
+    if not re.search(r"GROUP\s+BY\s+[^;]*\bbj\b", s, re.I):
+        return False
+    return bool(_RANK_PARTITION_BY_BJ.search(s))
+
+
+def _count_distinct_class_name_as_city_n(sql: str) -> bool:
+    s = sql or ""
+    if "tb_score_overview" not in s.lower():
+        return False
+    return bool(_COUNT_DISTINCT_BJ.search(s))
+
+
+def _raw_elective_cols(sql: str) -> list[str]:
+    s = sql or ""
+    if "tb_score_overview" not in s.lower():
+        return []
+    out: list[str] = []
+    for m in _RAW_ELECTIVE_STAT.finditer(s):
+        col = (m.group("col") or "").lower()
+        if col and col not in out:
+            out.append(col)
+    return out
+
+
+def _school_column_aliased_as_class(sql: str) -> bool:
+    """xx 是校名。别成班级再 GROUP BY xx，各班对比会塌成一行学校均分。"""
+    s = sql or ""
+    if "tb_score_overview" not in s.lower():
+        return False
+    return bool(
+        re.search(r"\bxx\s+AS\s+(?:class_name|班级|bj)\b", s, re.I)
+    )
+
+
+def _class_alias_grouped_by_school_only(sql: str) -> bool:
+    """SELECT 了 class_name/班级 却只按学校分组。"""
+    s = sql or ""
+    if "tb_score_overview" not in s.lower():
+        return False
+    if not re.search(r"\bAS\s+(?:class_name|班级)\b", s, re.I):
+        return False
+    if not re.search(r"GROUP\s+BY\s+", s, re.I):
+        return False
+    grouped_bj = bool(re.search(r"GROUP\s+BY\s+[^;]*\bbj\b", s, re.I))
+    grouped_xx = bool(re.search(r"GROUP\s+BY\s+[^;]*\bxx\b", s, re.I))
+    return grouped_xx and not grouped_bj
 
 
 def format_lint_warnings(warnings: list[str]) -> str:

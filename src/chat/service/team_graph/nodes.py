@@ -117,6 +117,7 @@ async def node_sub_tasks_loop(state: TeamState, config: RunnableConfig) -> dict[
 
     current_user_id = state["current_user_id"]
     workspace_oid = state["workspace_oid"]
+    question_tool = config["configurable"].get("question_tool")
 
     for idx, item in enumerate(plan_items):
         sub_task = item["sub_task"]
@@ -142,6 +143,7 @@ async def node_sub_tasks_loop(state: TeamState, config: RunnableConfig) -> dict[
                 sub_task_index=idx,
                 constraints=shared_constraints,
                 workspace_oid=workspace_oid,
+                question_tool=question_tool,
             )
         else:
             phase = await _run_data_analyst_phase(
@@ -153,6 +155,7 @@ async def node_sub_tasks_loop(state: TeamState, config: RunnableConfig) -> dict[
                 sub_task_index=idx,
                 constraints=shared_constraints,
                 workspace_oid=workspace_oid,
+                question_tool=question_tool,
             )
         for step in phase.state.steps:
             tagged = dict(step)

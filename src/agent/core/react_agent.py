@@ -41,6 +41,22 @@ logger = logging.getLogger(__name__)
 #: 一般不会超过 2 次；连续 3 次同工具几乎都是"坏循环"信号。
 _REPEAT_TOOL_WARN_THRESHOLD = 3
 
+#: 连续多少轮无法把 LLM 输出解析成工具调用后放弃整个循环。
+#: 这类失败不像工具业务失败那样能带来新信息：模型每轮看到几乎相同的上下文，
+#: 会稳定复现同一个格式错误，继续跑只是把 max_react_rounds 烧光再报同一条错。
+_MAX_CONSECUTIVE_FORMAT_FAILURES = 3
+
+#: 解析失败后注入下一轮 prompt 的强制纠偏指令。比 observation 回灌更硬——
+#: observation 是"系统告诉我 Y"，容易被长 system prompt 淹没；fail_reason 直接
+#: 拼在当轮 user 消息末尾，是模型最后读到的内容。
+_FORMAT_REPAIR_HINT = (
+    "你上一轮的输出无法被解析成工具调用。原因：{reason}\n"
+    "从现在起**只**输出一个 JSON 对象，前后不要有任何解释、前言、Markdown 代码块，"
+    "也不要使用 `[TOOL_CALL]`、`<invoke>` 这类模型原生的工具调用标记：\n"
+    '{{"thoughts": "一句话说明理由", "tool": "工具名", "args": {{}}}}\n'
+    "把 args 保持精简；已有信息足够时直接调用 `terminate`，结论写进 args.final_answer。"
+)
+
 
 class ReActAgent(ConversableAgent):
     """多轮 ReAct Agent 基类。
@@ -75,6 +91,7 @@ class ReActAgent(ConversableAgent):
             actions = [ToolAction(tool_pack=tool_pack)]
         super().__init__(actions=actions, **kwargs)
         self.tool_pack = tool_pack
+        self._structured_output_warned = False
         if max_react_rounds is not None:
             self.max_react_rounds = max_react_rounds
 
@@ -94,7 +111,16 @@ class ReActAgent(ConversableAgent):
                 if isinstance(obj, dict):
                     return json.dumps(obj, ensure_ascii=False)
             except Exception:
-                logger.debug("[%s] structured output failed, fallback plain chat", self.name, exc_info=True)
+                # 曾经是 debug：结构化输出是防"格式抖动"的第一道闸门，静默降级会让
+                # 它失效很久都没人发现。每个 agent 实例只告警一次，避免刷屏。
+                if not self._structured_output_warned:
+                    self._structured_output_warned = True
+                    logger.warning(
+                        "[%s] structured output unavailable, falling back to plain chat "
+                        "— JSON 格式错误率会显著上升",
+                        self.name,
+                        exc_info=True,
+                    )
         return await super().thinking(messages, sender)
 
     async def generate_reply(
@@ -116,6 +142,11 @@ class ReActAgent(ConversableAgent):
         last_tool_name: str | None = None
         tool_streak: int = 0
         tool_call_cache: dict[str, ActionOutput] = {}
+        # 格式失败（JSON 解析不出 / 缺 tool / 未知工具）单独计数：它与工具业务失败
+        # 不同，重跑不会带来新信息，必须靠 fail_reason 纠偏并在连续失败时尽早退出。
+        format_failures: int = 0
+        format_fail_reason: str | None = None
+        gave_up_on_format = False
 
         for round_idx in range(self.max_react_rounds):
             reply.rounds = round_idx + 1
@@ -124,7 +155,7 @@ class ReActAgent(ConversableAgent):
                 received_message=received_message,
                 rely_messages=running_rely,
                 reply=reply,
-                fail_reason=None,
+                fail_reason=format_fail_reason,
             )
             llm_text = await self.thinking(messages, sender)
             reply.content = llm_text
@@ -160,6 +191,27 @@ class ReActAgent(ConversableAgent):
                 await self.write_memories(received_message, reply, action_out)
                 return reply
 
+            # ToolAction 把所有"没解析出一个可执行工具"的情况都标成 action="tool_call"。
+            is_format_failure = (
+                not action_out.is_exe_success and action_out.action == ToolAction.name
+            )
+            if is_format_failure:
+                format_failures += 1
+                format_fail_reason = _FORMAT_REPAIR_HINT.format(
+                    reason=(action_out.content or "输出不是合法的工具调用 JSON").strip()
+                )
+                logger.warning(
+                    "[%s] format failure %d/%d at round %d: %s",
+                    self.name,
+                    format_failures,
+                    _MAX_CONSECUTIVE_FORMAT_FAILURES,
+                    reply.rounds,
+                    action_out.content,
+                )
+            else:
+                format_failures = 0
+                format_fail_reason = None
+
             # 统计 streak：仅"成功 + 已知工具 + 非 terminate"的轮计入。
             current_tool = (
                 action_out.action
@@ -192,6 +244,16 @@ class ReActAgent(ConversableAgent):
                     streak_warning=streak_warning,
                 )
             )
+
+            if format_failures >= _MAX_CONSECUTIVE_FORMAT_FAILURES:
+                gave_up_on_format = True
+                logger.error(
+                    "[%s] giving up after %d consecutive format failures at round %d",
+                    self.name,
+                    format_failures,
+                    reply.rounds,
+                )
+                break
 
             if not action_out.have_retry:
                 logger.info(
@@ -230,10 +292,18 @@ class ReActAgent(ConversableAgent):
                 {"agent": self.name, "text": reply.content or ""},
             )
         else:
+            if gave_up_on_format:
+                headline = (
+                    f"连续 {_MAX_CONSECUTIVE_FORMAT_FAILURES} 轮无法把模型输出解析成工具调用，"
+                    f"已提前终止（未耗尽 {self.max_react_rounds} 轮）。"
+                    "多为模型未遵循 JSON 工具协议或输出被截断，请重试或更换模型。"
+                )
+            else:
+                headline = f"达到最大 ReAct 轮数 ({self.max_react_rounds}) 仍未调用 terminate。"
             reply.action_report = ActionOutput(
                 is_exe_success=False,
                 content=(
-                    f"达到最大 ReAct 轮数 ({self.max_react_rounds}) 仍未调用 terminate。"
+                    f"{headline}"
                     f" 最后一次观察：{last_action_out.observations or last_action_out.content}"
                 ),
                 thoughts=last_action_out.thoughts,

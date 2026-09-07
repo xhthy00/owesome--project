@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Mapping
 
+from src.agent.education.intent_detect import EduIntent, detect_edu_intent
 from src.agent.education.report_types import REPORT_TYPE_LABELS, ReportType
 from src.agent.util.json_parser import parse_json_tolerant
+from src.common.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -830,43 +832,56 @@ def should_use_deterministic_report_plan(question: str, route: ReportRoute) -> b
     return False
 
 
-def _build_classify_prompt(question: str, candidates: list[ReportType]) -> list[dict[str, str]]:
+#: needs_report / report_type 的判定规则。与 ``intent_detect`` 共用，
+#: 合并调用时抽槽 prompt 也要带上这份规则，否则路由质量会掉。
+CLASSIFY_RULES = (
+    "- 事实查询（谁最高分、多少人、均分多少、排名第几、是谁、达线人数/率）→ needs_report=false，"
+    "report_type=null\n"
+    "- 点名学校对比引领校/支撑校/发展校的均分或单科 → needs_report=false，"
+    "用 overview.xxlb，禁止 JOIN tb_school 算均分\n"
+    "- 达线/预测线人数或率（未要求分析报告）→ needs_report=false\n"
+    "- 全市/各区达线情况、达线分析/报告、环比 → line_reach，禁止出结构化诊断报告\n"
+    "- 点了班级、具体学校、或引领校/支撑校/发展校时，达线问句 needs_report=false，"
+    "不是 line_reach（全市达线报告是全体学校合计）\n"
+    "- 明确要报告/总览/诊断/横向对比/群体特征/预警/学情分析报告/个人画像 → needs_report=true，"
+    "并从候选中选 report_type\n"
+    "- 具名学生（学号/姓名）+ 个人画像/学情/个人报告 → student_profile，"
+    "不是 subject_diagnosis\n"
+    "- 「班级横向对比 / 各班横向」→ grade_comparison，不是 group_feature；"
+    "仅「比较分析」且对比全市时不要选 grade_comparison\n"
+    "- 仅当明确「群体特征/按班级群体」时选 group_feature\n"
+    "- 点名第N题/单选N/小题N 的难度曲线 → needs_report=false，"
+    "不是科目诊断、不是十分段，仍调难度曲线工具\n"
+    "- 整卷难度曲线/难度分析/试卷得分率分析（未点名具体题号）→ difficulty_curve 报告，"
+    "不是十分段人数、不是科目诊断\n"
+    "- 「各校/各学校/各高中」+考试分析且未点名班级 → diagnostic_report，"
+    "禁止 comprehensive，禁止把「高三1月」理解成「高三(1)班」\n"
+    "- 拿不准时 needs_report=false（宁可只回答，不强行出报告）\n"
+)
+
+
+def render_type_catalog(candidates: list[ReportType]) -> str:
+    """候选报告类型清单（含一句话定义），供分类/抽槽 prompt 共用。"""
     lines = []
     for rt in candidates:
         label = REPORT_TYPE_LABELS.get(rt, rt.value)
         desc = _REPORT_TYPE_DEFS.get(rt, "")
         lines.append(f"- `{rt.value}`（{label}）：{desc}")
-    catalog = "\n".join(lines)
+    return "\n".join(lines)
+
+
+def _build_classify_prompt(question: str, candidates: list[ReportType]) -> list[dict[str, str]]:
     system = (
         "你是教育学情意图分类器。先判断用户是否需要生成 HTML 学情报告，再（若需要）选类型。\n"
         "只输出一个 JSON 对象，不要 Markdown：\n"
         '{"needs_report":true或false,"report_type":"<枚举或null>",'
         '"confidence":0.0到1.0,"reason":"一句话"}\n'
-        "规则：\n"
-        "- 事实查询（谁最高分、多少人、均分多少、排名第几、是谁、达线人数/率）→ needs_report=false，"
-        "report_type=null\n"
-        "- 点名学校对比引领校/支撑校/发展校的均分或单科 → needs_report=false，"
-        "用 overview.xxlb，禁止 JOIN tb_school 算均分\n"
-        "- 达线/预测线人数或率（未要求分析报告）→ needs_report=false\n"
-        "- 全市/各区达线情况、达线分析/报告、环比 → line_reach，禁止出结构化诊断报告\n"
-        "- 点了班级、具体学校、或引领校/支撑校/发展校时，达线问句 needs_report=false，"
-        "不是 line_reach（全市达线报告是全体学校合计）\n"
-        "- 明确要报告/总览/诊断/横向对比/群体特征/预警/学情分析报告/个人画像 → needs_report=true，"
-        "并从候选中选 report_type\n"
-        "- 具名学生（学号/姓名）+ 个人画像/学情/个人报告 → student_profile，"
-        "不是 subject_diagnosis\n"
-        "- 「班级横向对比 / 各班横向」→ grade_comparison，不是 group_feature；"
-        "仅「比较分析」且对比全市时不要选 grade_comparison\n"
-        "- 仅当明确「群体特征/按班级群体」时选 group_feature\n"
-        "- 点名第N题/单选N/小题N 的难度曲线 → needs_report=false，"
-        "不是科目诊断、不是十分段，仍调难度曲线工具\n"
-        "- 整卷难度曲线/难度分析/试卷得分率分析（未点名具体题号）→ difficulty_curve 报告，"
-        "不是十分段人数、不是科目诊断\n"
-        "- 「各校/各学校/各高中」+考试分析且未点名班级 → diagnostic_report，"
-        "禁止 comprehensive，禁止把「高三1月」理解成「高三(1)班」\n"
-        "- 拿不准时 needs_report=false（宁可只回答，不强行出报告）\n"
+        f"规则：\n{CLASSIFY_RULES}"
     )
-    user = f"候选报告类型（仅 needs_report=true 时选用）：\n{catalog}\n\n用户问题：{question}"
+    user = (
+        "候选报告类型（仅 needs_report=true 时选用）：\n"
+        f"{render_type_catalog(candidates)}\n\n用户问题：{question}"
+    )
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
@@ -931,11 +946,12 @@ def _parse_llm_route(raw: str, candidates: list[ReportType]) -> ReportRoute | No
     )
 
 
-async def classify_report_intent(
-    question: str,
-    llm_client: Any | None = None,
-) -> ReportRoute:
-    """异步分类：优先 LLM，失败则规则兜底。"""
+def _hard_route(question: str) -> ReportRoute | None:
+    """硬规则短路：命中返回确定路由，未命中返回 ``None`` 交给 LLM。
+
+    抽出来是为了让槽位抽取能拿到"路由已定"这个事实——DB-GPT 的 Intent 检测
+    不因为分类走了捷径就跳过抽槽，硬路由只作为 hint 注入。
+    """
     from src.agent.education.query_parse import (
         is_citywide_analysis_query,
         is_class_weak_subject_query,
@@ -1087,7 +1103,21 @@ async def classify_report_intent(
                 source="hard",
             )
 
+    return None
+
+
+async def classify_report_intent(
+    question: str,
+    llm_client: Any | None = None,
+) -> ReportRoute:
+    """异步分类：硬规则 → LLM → 规则兜底。"""
+    q = (question or "").strip()
+    hard = _hard_route(q)
+    if hard is not None:
+        return hard
+
     if llm_client is not None and hasattr(llm_client, "chat"):
+        pool = _candidate_pool(q)
         try:
             messages = _build_classify_prompt(q, pool)
             raw = await llm_client.chat(messages)
@@ -1104,6 +1134,89 @@ async def classify_report_intent(
 def classify_report_intent_sync(question: str) -> ReportRoute:
     """同步入口（无 LLM）：规则兜底。"""
     return fallback_classify_report_intent(question)
+
+
+def _route_hint_text(route: ReportRoute | None) -> str | None:
+    if route is None:
+        return None
+    rt = route.report_type.value if route.report_type else "null"
+    return (
+        f"needs_report={str(route.needs_report).lower()} report_type={rt} "
+        f"（来源：{route.source}，理由：{route.reason}）。分类已定，你只需专注抽槽。"
+    )
+
+
+def _route_from_intent(intent: EduIntent, pool: list[ReportType]) -> ReportRoute | None:
+    """把 LLM 意图结果读成 ReportRoute；不合法返回 None 交给规则兜底。"""
+    if not intent.ok:
+        return None
+    reason = intent.reason or "LLM 意图识别"
+    if not intent.needs_report:
+        return ReportRoute(
+            needs_report=False,
+            report_type=None,
+            confidence=intent.confidence,
+            reason=reason,
+            source="llm",
+        )
+    if not intent.report_type:
+        return None
+    try:
+        rt = ReportType(intent.report_type)
+    except ValueError:
+        return None
+    if rt not in pool:
+        return None
+    return ReportRoute(
+        needs_report=True,
+        report_type=rt,
+        confidence=intent.confidence,
+        reason=reason,
+        source="llm",
+    )
+
+
+async def classify_and_extract(
+    question: str,
+    llm_client: Any | None = None,
+    *,
+    history: list[Mapping[str, str]] | None = None,
+    edu_scope: Mapping[str, Any] | None = None,
+    prev_intent: Mapping[str, Any] | None = None,
+) -> tuple[ReportRoute, EduIntent]:
+    """路由 + LLM 抽槽。
+
+    路由可以被硬规则短路，抽槽不可以——「扬大附中的优势学科」正是走硬短路那条路，
+    如果抽槽跟着短路，school_name 就永远拿不到。硬路由结果作为 hint 注入抽槽调用。
+
+    没有硬短路时两件事共用同一次结构化调用，延迟与改造前持平。
+    """
+    q = (question or "").strip()
+    hard = _hard_route(q)
+
+    if not get_settings().edu_llm_slot_extraction:
+        route = hard if hard is not None else await classify_report_intent(q, llm_client)
+        return route, EduIntent()
+
+    pool = _candidate_pool(q) or list(ReportType)
+    intent = await detect_edu_intent(
+        q,
+        llm_client,
+        candidates=pool,
+        route_hint=_route_hint_text(hard),
+        history=history,
+        edu_scope=edu_scope,
+        prev_intent=prev_intent,
+        type_catalog=render_type_catalog(pool),
+        routing_rules=CLASSIFY_RULES,
+    )
+
+    if hard is not None:
+        return hard, intent
+    route = _route_from_intent(intent, pool)
+    if route is None:
+        route = fallback_classify_report_intent(q)
+    return route, intent
 
 
 EXPECTED_PLAN_TOOLS: dict[ReportType, frozenset[str]] = {
@@ -1364,8 +1477,10 @@ def coerce_plan_to_route(
 
 
 __all__ = [
+    "CLASSIFY_RULES",
     "EXPECTED_PLAN_TOOLS",
     "ReportRoute",
+    "classify_and_extract",
     "classify_report_intent",
     "classify_report_intent_sync",
     "coerce_plan_to_route",
@@ -1374,5 +1489,6 @@ __all__ = [
     "plan_items_for_report_type",
     "plan_items_for_route",
     "plan_matches_report_type",
+    "render_type_catalog",
     "should_use_deterministic_report_plan",
 ]

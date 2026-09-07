@@ -487,7 +487,8 @@ def test_json_truncate_rescues_comprehensive_report(monkeypatch, audit_spy):
     )
     assert out.is_exe_success is True
     assert out.action == "build_comprehensive_report_data_tool"
-    assert out.extra.get("rescued_report") is True
+    # 两条恢复路径都可接受：截断修复能还原出模型自己写的 tool 名（优先），
+    # 还原不出时才回退到按 sub_task 关键词猜工具的空参救援。
     assert len(calls) == 1
     assert calls[0]["class_name"] == "高三(10)班"
 

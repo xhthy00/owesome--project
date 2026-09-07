@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.agent.core.agent import AgentMessage
 from src.agent.core.profile import ProfileConfig
 from src.agent.core.react_agent import ReActAgent
-from src.agent.core.agent import AgentMessage
 from src.agent.education.query_parse import format_scope_constraints
 from src.agent.resource.manager import (
     DEFAULT_PACK_NAME,
@@ -38,6 +38,8 @@ TOOL_AGENT_DESC = """[分析范围约束]
 - 如果子任务只需要算术/比例/换算，优先用 `calculate`；
 - 如果子任务需要取数，使用 list/describe/sample/execute_sql；
 - 如果用户要求可视化报告/分析报告/图表页面/HTML 报告，使用 `render_html_report` 返回最终 HTML；
+- 仅当多个执行方向都合理且无法从权限、历史、schema 或工具推断时调用 `question`；
+  不要用它询问硬槽、数据库可查信息或 SQL 错误。
 
 [教育学情报告组装 — 严格流程]
 当子任务是"组装学情/成绩分析 HTML 报告"时，**严禁直接写出 HTML 文档、

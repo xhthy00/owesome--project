@@ -20,8 +20,10 @@ from src.agent.education.clarification import (
     judge_clarification,
     merge_clarification_reply,
     parse_pending_clarify,
+    sanitize_llm_slots,
 )
-from src.agent.education.intent_router import ReportRoute, classify_report_intent
+from src.agent.education.intent_detect import EduIntent
+from src.agent.education.intent_router import ReportRoute, classify_and_extract
 from src.chat.schemas import ChatRequest
 from src.chat.service.agent_runner import (
     EmitCallback,
@@ -31,6 +33,15 @@ from src.chat.service.agent_runner import (
 )
 
 logger = logging.getLogger(__name__)
+
+_NEW_QUESTION_PREFIXES = (
+    "换个问题",
+    "换一个问题",
+    "新问题",
+    "另外问",
+    "重新提问",
+    "忽略上面",
+)
 
 
 @dataclass
@@ -44,16 +55,32 @@ class ClarifyTurnResult:
     route: ReportRoute | None = None
     effective_question: str = ""
     persist_question: str = ""
+    pending_payload: dict[str, Any] | None = None
 
 
-def _load_pending(conversation_id: int | None, user_id: int) -> dict[str, Any] | None:
+def _load_pending(
+    conversation_id: int | None,
+    user_id: int,
+    workspace_oid: int,
+) -> dict[str, Any] | None:
     if not conversation_id:
         return None
     try:
+        from src.chat.crud.agent_run import get_last_agent_run
         from src.chat.crud.chat import get_latest_conversation_record
         from src.common.core.database import get_db_session
 
         with get_db_session() as session:
+            waiting = get_last_agent_run(
+                session,
+                conversation_id=int(conversation_id),
+                user_id=int(user_id),
+                workspace_oid=int(workspace_oid),
+            )
+            if waiting is not None and waiting.pending_payload:
+                pending = parse_pending_clarify(waiting.pending_payload)
+                if pending is not None:
+                    return pending
             rec = get_latest_conversation_record(session, int(conversation_id), int(user_id))
             if rec is None:
                 return None
@@ -82,11 +109,17 @@ def _apply_filled(constraints: _RunConstraints, filled: dict[str, str]) -> None:
         pass
 
 
-def _chat_fn(llm_client: Any):
-    async def _run(messages: list[dict[str, str]]) -> str:
-        return await llm_client.chat(messages)
+def _recent_history(conversation_id: int | None) -> list[dict[str, str]]:
+    """近几轮对话，供 LLM 从上下文里补槽（对标 DB-GPT 的 most_recent_memories）。"""
+    if not conversation_id:
+        return []
+    try:
+        from src.chat.service.message_history import load_windowed_history, to_role_dicts
 
-    return _run
+        return to_role_dicts(load_windowed_history(int(conversation_id)))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("load intent history failed: %s", exc)
+        return []
 
 
 async def _load_options_for_slot(
@@ -174,6 +207,7 @@ async def _link_or_clarify(
     route: ReportRoute,
     persist_question: str,
     effective_question: str,
+    intent: EduIntent | None = None,
 ) -> ClarifyTurnResult | None:
     """值链接：唯一命中写入规范名；0/N 转追问。目录失败则放行。"""
     from src.chat.service.conversation_context import (
@@ -213,6 +247,7 @@ async def _link_or_clarify(
             filled=dict(result.bound or filled),
             route=route,
             persist_question=persist_question,
+            intent=intent,
         )
     changed = {
         k: v
@@ -257,7 +292,14 @@ async def maybe_clarify_turn(
         merge_inherited_slots,
     )
 
-    pending = _load_pending(request.conversation_id, current_user_id)
+    is_new_question = str(request.question or "").strip().lower().startswith(
+        _NEW_QUESTION_PREFIXES
+    )
+    pending = (
+        None
+        if is_new_question
+        else _load_pending(request.conversation_id, current_user_id, workspace_oid)
+    )
     if pending:
         request.question = merge_clarification_reply(pending, request.question)
     persist_question = request.question
@@ -278,15 +320,27 @@ async def maybe_clarify_turn(
     constraints.report_audience = request.report_audience
     constraints.user_utterance = persist_question
 
-    route = await classify_report_intent(request.question, llm_client)
+    edu = constraints.edu_scope or {}
+    route, intent = await classify_and_extract(
+        request.question,
+        llm_client,
+        history=_recent_history(request.conversation_id),
+        edu_scope=edu,
+        prev_intent=pending.get("intent") if pending else None,
+    )
     constraints.report_route = route.to_dict()
 
-    edu = constraints.edu_scope or {}
+    # LLM 抽槽优先，规则抽槽兜底并集：规则还负责权限派生的槽（绑定学校 / 唯一班级 /
+    # 学生本人学号），那些 LLM 看不到；问句里明说的值以 LLM 为准。
     current_filled = extract_filled_slots(request.question, edu)
+    current_filled.update(sanitize_llm_slots(intent.slots))
     turn_ctx = load_turn_context(request.conversation_id, current_user_id, edu)
     filled = merge_inherited_slots(current_filled, turn_ctx.inherited, request.question)
     extra = extra_inherited_slots(current_filled, filled)
-    effective_question = apply_inherited_supplements(request.question, extra)
+    # user_input 是 LLM 补全后的完整指令；「补充：标签=值」标记必须保留——
+    # 下游 sub_task 与工具会对 user_question 做正则抽取，纯改写会打断这条链路。
+    base_question = intent.user_input if intent.ok and intent.user_input else request.question
+    effective_question = apply_inherited_supplements(base_question, extra)
     _apply_filled(constraints, filled)
     candidates = candidate_missing_slots(route, request.question, filled, edu)
 
@@ -313,6 +367,7 @@ async def maybe_clarify_turn(
             route=route,
             persist_question=persist_question,
             effective_question=effective_question,
+            intent=intent,
         )
         if linked is not None:
             return linked
@@ -324,7 +379,7 @@ async def maybe_clarify_turn(
         filled=filled,
         candidates=candidates,
         edu_scope=edu,
-        chat_fn=_chat_fn(llm_client),
+        llm_ask_user=intent.ask_user,
     )
     if need is None:
         linked = await _link_or_clarify(
@@ -338,6 +393,7 @@ async def maybe_clarify_turn(
             route=route,
             persist_question=persist_question,
             effective_question=effective_question,
+            intent=intent,
         )
         if linked is not None:
             return linked
@@ -363,6 +419,7 @@ async def maybe_clarify_turn(
         filled=filled,
         route=route,
         persist_question=persist_question,
+        intent=intent,
     )
     halted.effective_question = effective_question
     halted.persist_question = persist_question
@@ -381,8 +438,12 @@ async def _emit_and_persist_clarify(
     filled: dict[str, str],
     route: ReportRoute,
     persist_question: str,
+    intent: EduIntent | None = None,
 ) -> ClarifyTurnResult:
     payload = need.to_payload()
+    if intent is not None and intent.ok:
+        # 下一轮读回来当 prev_intent，走 DB-GPT 的"增量合并"而不是重新识别。
+        payload["intent"] = intent.to_dict()
     await emit("clarify", payload)
     await emit("summary", {"content": need.prompt})
     record_id = 0
@@ -410,6 +471,7 @@ async def _emit_and_persist_clarify(
         filled=filled,
         route=route,
         persist_question=persist_question,
+        pending_payload=payload,
     )
 
 

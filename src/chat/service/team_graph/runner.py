@@ -21,6 +21,7 @@ async def run_team_stream_graph(
     enable_tool_agent: bool = True,
     workspace_oid: int = 1,
     constraints: Any = None,
+    question_tool: Any = None,
 ) -> int:
     """与 :func:`run_team_stream` 行为对齐，经 LangGraph 调度。"""
     graph = build_team_graph()
@@ -38,6 +39,7 @@ async def run_team_stream_graph(
             "emit": emit,
             "llm_client": llm,
             "enable_tool_agent": enable_tool_agent,
+            "question_tool": question_tool,
         }
     }
     final = await graph.ainvoke(initial, config)

@@ -39,6 +39,61 @@ def _dict_messages_to_langchain(messages: list[dict[str, str]]) -> list[BaseMess
     return converted
 
 
+def _response_text(response: Any) -> str:
+    content = getattr(response, "content", None)
+    if content is None:
+        return str(response)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text") or ""))
+            else:
+                parts.append(str(part))
+        return "".join(parts)
+    return str(content)
+
+
+def _extract_native_tool_call(response: Any) -> dict[str, Any] | None:
+    """把模型原生 function-calling 结果归一化成 ReAct 协议的 ``{"tool","args"}``。
+
+    OpenAI 兼容网关（Qwen / MiniMax / DeepSeek 等）在模型走原生工具调用时，会把
+    调用体放进 ``tool_calls`` / ``additional_kwargs``，只在 ``content`` 里留下前言
+    和形如 ``[TOOL_CALL] {too`` 的残片。若只读 ``content``，ReAct 侧就会反复报
+    "无法从 LLM 输出解析 JSON" 并空转到轮数上限。
+    """
+    call: Any = None
+    calls = getattr(response, "tool_calls", None)
+    if isinstance(calls, list) and calls:
+        call = calls[0]
+    else:
+        extra = getattr(response, "additional_kwargs", None) or {}
+        raw_calls = extra.get("tool_calls")
+        if isinstance(raw_calls, list) and raw_calls:
+            call = raw_calls[0]
+        elif isinstance(extra.get("function_call"), dict):
+            call = {"function": extra["function_call"]}
+    if not isinstance(call, dict):
+        return None
+
+    fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+    name = call.get("name") or fn.get("name")
+    if not name:
+        return None
+
+    args = call.get("args")
+    if args is None:
+        args = fn.get("arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            args = None
+    return {"tool": str(name), "args": args if isinstance(args, dict) else {}}
+
+
 def _truncate_observation_for_llm(text: str, *, limit: int = _MAX_OBSERVATION_CHARS) -> str:
     """截断工具 observation，避免多轮 ReAct 上下文过大触发厂商审核或超长。"""
     if len(text) <= limit:
@@ -173,12 +228,18 @@ class LangChainLlmClient:
 
         await self._record_usage(response)
 
-        content = getattr(response, "content", None)
-        if content is None:
-            return str(response)
-        if isinstance(content, str):
-            return content
-        return "".join(str(part) for part in content)
+        text = _response_text(response)
+        native = _extract_native_tool_call(response)
+        if native is not None:
+            thoughts = text.strip()
+            if thoughts:
+                native["thoughts"] = thoughts
+            logger.info(
+                "LLM returned a native tool_call for %r; normalized to ReAct JSON",
+                native.get("tool"),
+            )
+            return json.dumps(native, ensure_ascii=False)
+        return text
 
     @staticmethod
     async def _record_usage(response: Any) -> None:

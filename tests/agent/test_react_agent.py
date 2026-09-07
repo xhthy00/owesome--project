@@ -17,7 +17,7 @@ import pytest
 
 from src.agent.core.agent import AgentMessage
 from src.agent.core.profile import ProfileConfig
-from src.agent.core.react_agent import ReActAgent
+from src.agent.core.react_agent import _MAX_CONSECUTIVE_FORMAT_FAILURES, ReActAgent
 from src.agent.expand.user_proxy import UserProxyAgent
 from src.agent.resource.tool.base import ToolResult
 from src.agent.resource.tool.builtin import TerminateTool
@@ -376,6 +376,79 @@ def test_react_different_tools_do_not_trigger_warning():
                 "交替调工具不应产生连续警告，但警告出现在："
                 f"{m.get('content')[:100]!r}"
             )
+
+
+def test_react_gives_up_after_consecutive_format_failures():
+    """模型稳定输出非工具调用文本时，应尽早退出而不是烧满 max_react_rounds。"""
+    garbage = "\n\n我需要先查看成绩表结构，然后编写SQL查询。 [TOOL_CALL] {too"
+    llm = FakeLlmClient([garbage])  # 单条 reply 会被反复返回
+    agent = _TrivialReActAgent(
+        llm_client=llm,
+        tool_pack=_pack_with(list_things),
+        max_react_rounds=15,
+    )
+
+    reply = _run(
+        agent.generate_reply(
+            received_message=AgentMessage(content="q", role="user"),
+            sender=UserProxyAgent(),
+        )
+    )
+
+    assert len(llm.calls) == _MAX_CONSECUTIVE_FORMAT_FAILURES, (
+        f"应在第 {_MAX_CONSECUTIVE_FORMAT_FAILURES} 轮退出，实际调用了 {len(llm.calls)} 轮"
+    )
+    assert reply.action_report is not None
+    assert reply.action_report.is_exe_success is False
+    assert "提前终止" in (reply.action_report.content or "")
+
+
+def test_react_injects_format_repair_hint_after_parse_failure():
+    """解析失败后，下一轮 user 消息末尾必须带上强制 JSON 纠偏指令。"""
+    llm = FakeLlmClient(
+        [
+            "抱歉，我先说明一下思路……",  # 非 JSON，解析失败
+            '{"tool": "terminate", "args": {"final_answer": "recovered"}}',
+        ]
+    )
+    agent = _TrivialReActAgent(llm_client=llm, tool_pack=_pack_with(list_things))
+
+    reply = _run(
+        agent.generate_reply(
+            received_message=AgentMessage(content="q", role="user"),
+            sender=UserProxyAgent(),
+        )
+    )
+
+    assert reply.content == "recovered"
+    round2_user = llm.calls[1][-1]
+    assert round2_user["role"] == "user"
+    assert "只**输出一个 JSON 对象" in round2_user["content"]
+
+
+def test_react_format_failure_counter_resets_on_success():
+    """一次格式失败后若恢复正常，计数应归零，不会被后续零星失败拖死。"""
+    llm = FakeLlmClient(
+        [
+            "不是 JSON",
+            '{"tool": "list_things", "args": {}}',
+            "又不是 JSON",
+            '{"tool": "list_things", "args": {}}',
+            "还不是 JSON",
+            '{"tool": "terminate", "args": {"final_answer": "done"}}',
+        ]
+    )
+    agent = _TrivialReActAgent(llm_client=llm, tool_pack=_pack_with(list_things))
+
+    reply = _run(
+        agent.generate_reply(
+            received_message=AgentMessage(content="q", role="user"),
+            sender=UserProxyAgent(),
+        )
+    )
+
+    assert reply.content == "done"
+    assert len(llm.calls) == 6
 
 
 def test_react_injects_tools_prompt_into_system_message():

@@ -1,5 +1,15 @@
 import { useCallback, useRef, useState } from "react";
-import { createConversation, getConversationDetail, sendMessageStream, updateReportReview, replaceRecordReports, type ClarifyPayload } from "@/api/adapter/chatAdapter";
+import {
+  createConversation,
+  getConversationDetail,
+  rejectQuestion as rejectQuestionRequest,
+  replyQuestion as replyQuestionRequest,
+  sendMessageStream,
+  updateReportReview,
+  replaceRecordReports,
+  type ClarifyPayload,
+  type Question
+} from "@/api/adapter/chatAdapter";
 import { notifyConversationChanged, snippetConversationTitle } from "@/utils/conversationTitle";
 import { genUUID } from "@/utils/uuid";
 import { replaceRecommendationsHtml } from "@/utils/reportRecommendations";
@@ -276,6 +286,9 @@ export function useChat() {
   const [runMetrics, setRunMetrics] = useState<RunMetrics>(EMPTY_RUN_METRICS);
   const [metricsByRunId, setMetricsByRunId] = useState<Record<string, RunMetrics>>({});
   const [clarifyByRunId, setClarifyByRunId] = useState<Record<string, ClarifyPayload>>({});
+  const [pendingQuestion, setPendingQuestion] = useState<Question | undefined>(undefined);
+  const [questionSubmitting, setQuestionSubmitting] = useState(false);
+  const [questionError, setQuestionError] = useState<string | null>(null);
   const [conversationId, setConversationId] = useState<number | undefined>(undefined);
   /** 当前进行中的一轮 runId；供专家条计时按「每一问」清零 */
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
@@ -338,6 +351,9 @@ export function useChat() {
     clearMetricsTimer();
     setLoading(false);
     setActivity("");
+    setPendingQuestion(undefined);
+    setQuestionSubmitting(false);
+    setQuestionError(null);
     setRunMetrics((prev) => {
       const next: RunMetrics = {
         ...prev,
@@ -828,6 +844,26 @@ export function useChat() {
               setClarifyByRunId((prev) => ({ ...prev, [runId]: payload }));
               setActivity("请补充分析范围");
             },
+            onQuestionAsked: (payload) => {
+              setPendingQuestion((current) => {
+                if (current && current.request_id !== payload.request_id) {
+                  console.warn(
+                    `Replacing pending question ${current.request_id} with ${payload.request_id}`
+                  );
+                }
+                return payload;
+              });
+              setQuestionSubmitting(false);
+              setQuestionError(null);
+              setActivity("需要您的确认");
+            },
+            onQuestionRejected: ({ request_id }) => {
+              setPendingQuestion((current) =>
+                current?.request_id === request_id ? undefined : current
+              );
+              setQuestionSubmitting(false);
+              setQuestionError(null);
+            },
             onUsage: (payload) => {
               const total =
                 typeof payload.total_tokens === "number"
@@ -863,6 +899,9 @@ export function useChat() {
             onDone: async (recordId) => {
               finalizeRunSteps();
               clearMetricsTimer();
+              setPendingQuestion(undefined);
+              setQuestionSubmitting(false);
+              setQuestionError(null);
               progressRef.current = { ...progressRef.current, finished: true };
               setRunMetrics((prev) => {
                 const next: RunMetrics = {
@@ -1032,7 +1071,45 @@ export function useChat() {
     ]
   );
 
+  const replyQuestion = useCallback(
+    async (answers: string[][]) => {
+      if (!pendingQuestion || questionSubmitting) return;
+      const requestId = pendingQuestion.request_id;
+      setQuestionSubmitting(true);
+      setQuestionError(null);
+      try {
+        await replyQuestionRequest(requestId, answers);
+        setPendingQuestion((current) =>
+          current?.request_id === requestId ? undefined : current
+        );
+      } catch (err) {
+        setQuestionError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setQuestionSubmitting(false);
+      }
+    },
+    [pendingQuestion, questionSubmitting]
+  );
+
+  const rejectQuestion = useCallback(async () => {
+    if (!pendingQuestion || questionSubmitting) return;
+    const requestId = pendingQuestion.request_id;
+    setQuestionSubmitting(true);
+    setQuestionError(null);
+    try {
+      await rejectQuestionRequest(requestId);
+      setPendingQuestion((current) =>
+        current?.request_id === requestId ? undefined : current
+      );
+    } catch (err) {
+      setQuestionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQuestionSubmitting(false);
+    }
+  }, [pendingQuestion, questionSubmitting]);
+
   const loadConversation = useCallback(async (targetConversationId: number) => {
+    stop();
     const detail = await getConversationDetail(targetConversationId);
     setConversationId(detail.id);
     if (detail.datasource_id) {
@@ -1173,10 +1250,14 @@ export function useChat() {
     setQueryResults(nextQueryResults);
     setChartByRunId(nextChartByRunId);
     setClarifyByRunId({});
+    setPendingQuestion(undefined);
+    setQuestionSubmitting(false);
+    setQuestionError(null);
     setLoading(false);
-  }, []);
+  }, [stop]);
 
   const clearConversation = useCallback(() => {
+    stop();
     setConversationId(undefined);
     setMessages([]);
     setExecutionSteps([]);
@@ -1187,12 +1268,15 @@ export function useChat() {
     setQueryResults([]);
     setChartByRunId({});
     setClarifyByRunId({});
+    setPendingQuestion(undefined);
+    setQuestionSubmitting(false);
+    setQuestionError(null);
     setLoading(false);
     setActivity("");
     clearMetricsTimer();
     setRunMetrics(EMPTY_RUN_METRICS);
     planDoneIdxRef.current = new Set();
-  }, [clearMetricsTimer]);
+  }, [clearMetricsTimer, stop]);
 
   const patchReport = useCallback(
     async (
@@ -1281,6 +1365,11 @@ export function useChat() {
     runMetrics,
     metricsByRunId,
     clarifyByRunId,
+    pendingQuestion,
+    questionSubmitting,
+    questionError,
+    replyQuestion,
+    rejectQuestion,
     send,
     stop,
     loadConversation,

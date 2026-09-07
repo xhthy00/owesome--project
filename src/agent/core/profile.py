@@ -27,14 +27,23 @@ class ProfileConfig:
     goal: str = ""
     constraints: list[str] = field(default_factory=list)
     desc: str = ""
+    retry_goal: str = ""
+    retry_constraints: list[str] = field(default_factory=list)
 
     def render_system_prompt(self, variables: dict[str, object] | None = None) -> str:
         """按固定结构拼出 system prompt，并用 {{var}} 做最小模板替换。"""
+        is_retry = bool((variables or {}).get("is_retry_chat"))
+        goal = self.retry_goal if is_retry and self.retry_goal else self.goal
+        constraints = (
+            self.retry_constraints
+            if is_retry and self.retry_constraints
+            else self.constraints
+        )
         parts: list[str] = [f"你是 {self.name}（角色：{self.role}）。"]
-        if self.goal:
-            parts.append(f"目标：{self.goal}")
-        if self.constraints:
-            bullets = "\n".join(f"- {c}" for c in self.constraints)
+        if goal:
+            parts.append(f"目标：{goal}")
+        if constraints:
+            bullets = "\n".join(f"- {c}" for c in constraints)
             parts.append(f"约束：\n{bullets}")
         if self.desc:
             parts.append(self.desc)

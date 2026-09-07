@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # 多轮对话：按用户提问轮数截取 chat_log 历史（对齐 SQLBot GENERATE_SQL_QUERY_HISTORY_ROUND_COUNT）
     generate_sql_query_history_round_count: int = 3
 
+    # 教育澄清：用 LLM 抽取意图槽位（对标 DB-GPT IntentDetection）。关掉则只走规则抽槽。
+    edu_llm_slot_extraction: bool = True
+
 
 
 @lru_cache

@@ -104,7 +104,7 @@ PLANNER_DESC = """[你的职责]
 - 年级对比报告（grade_comparison）/ **学校 + 各班横向多维对比**
   （如「扬州中学在连淮扬镇数学考试中各个班级的横向多维对比分析」）——
   **必须拆 3 个子任务**，范围是**全校各班**，**严禁**填写 class_name（不得缩成某一个班）：
-  ["查询【XX学校】在【XX考试】【XX科目】整体成绩 KPI：均分、及格率、优秀率、分数段、各班对比（SQL 须 JOIN tb_school/tb_exam 且 SELECT exam_score；**禁止**按单班过滤）",
+  ["查询【XX学校】在【XX考试】【XX科目】整体成绩 KPI：均分、及格率、优秀率、分数段、各班对比（各班列必须是 bj 不是 xx；GROUP BY xx,bj；禁止 SELECT xx AS class_name；禁止只 GROUP BY xx；SQL 须 JOIN tb_school/tb_exam 且 SELECT exam_score；**禁止**按单班过滤）",
    {"task": "调 fetch_subject_diagnosis_data_tool(school_name=【XX学校】, subject_name=【XX科目】, exam_name=【XX考试】) 查询小题明细与知识点——本步仅 fetch，禁止 render，**禁止传 class_name**；完成后 terminate", "sub_task_agent": "ToolExpert"},
    {"task": "调 build_subject_diagnosis_sections_tool(school_name=【XX学校】, exam_name=【XX考试】, subject_name=【XX科目】, render=true) 一步完成全校 stats+各班对比 HTML；**禁止传 class_name**；完成后 terminate", "sub_task_agent": "ToolExpert"}]
 - 科目诊断报告（subject_diagnosis）：
@@ -174,6 +174,7 @@ PLANNER_DESC = """[你的职责]
   名次/参赛数≤25% 为全市前列（优势），≥50% 为全市靠后（薄弱），中间为中游；
   **禁止**把本校各科里名次较差的直接叫薄弱（全市第7/37仍属前列）；
   **禁止**用本校/本班各科均分互相比较；**禁止** build_class_weak_subject_report_data_tool；
+  班级全市排名禁止 PARTITION BY bj、禁止 COUNT(DISTINCT bj)；
   返回 plans=[原问题]。
 **例外**：问题含学号/「学生xxx」且询问「得分情况/成绩/知识点」——**不算简单问题**，
 须走上方「单个学生 + 单次考试」2 步计划（含 build_student_subject_diagnosis_tool），
@@ -244,7 +245,8 @@ def build_school_subject_report_plan_items(question: str) -> list[dict[str, str]
         "，禁止传 class_name**；" if school_wide else "**；"
     )
     kpi_scope = (
-        "各班对比（SQL 须 JOIN tb_school/tb_exam 且 SELECT exam_score；**禁止**按单班过滤）"
+        "各班对比（各班列必须是 bj 不是 xx；GROUP BY xx,bj；禁止 SELECT xx AS class_name；"
+        "禁止只 GROUP BY xx；SQL 须 JOIN tb_school/tb_exam 且 SELECT exam_score；**禁止**按单班过滤）"
         if school_wide
         else f"班级【{class_name}】KPI（SQL 须 JOIN tb_school/tb_exam 且 SELECT exam_score）"
     )
@@ -296,7 +298,8 @@ def build_school_class_comparison_plan_items(question: str) -> list[dict[str, st
             "sub_task": (
                 f"查询【{school}】在【{exam_l}】【{subject_l}】整体成绩 KPI："
                 "均分、及格率、优秀率、分数段分布、各班对比"
-                "（SQL 须 JOIN tb_school/tb_exam 且 SELECT exam_score；**禁止**按单班过滤）；"
+                "（各班列必须是 bj 不是 xx；GROUP BY xx,bj；禁止 SELECT xx AS class_name；"
+                "禁止只 GROUP BY xx；SQL 须 JOIN tb_school/tb_exam 且 SELECT exam_score；**禁止**按单班过滤）；"
                 "**exam_name / subject_name 必须取自问题原文，禁止填「本次考试」「该科目」**"
             ),
             "sub_task_agent": _DEFAULT_SUB_TASK_AGENT,
@@ -417,8 +420,11 @@ def _subject_strength_fact_hint(class_name: str) -> str:
             "本题是优势/薄弱学科：按该班各科均分的**全市班级排名相对位置**判断"
             "（名次/参赛数≤25%=前列/优势，≥50%=靠后/薄弱，中间=中游；"
             "禁止把本班各科里名次较差的直接叫薄弱）。"
-            "查 tb_score_overview，xsxz='在籍生'，GROUP BY xx,bj 后对各科 AVG FILTER col>0 做 RANK()；"
-            "外层再滤目标校+班。禁止用该班各科均分互相比较，禁止班际报告工具。"
+            "查 tb_score_overview，xsxz='在籍生'，GROUP BY xx,bj 后对各科 AVG FILTER col>0 "
+            "做 RANK() OVER (ORDER BY 均分 DESC) 与 COUNT(*) OVER()；"
+            "禁止 PARTITION BY bj（那是同名班跨校互比）；禁止 COUNT(DISTINCT bj)（班名重复，不是全市班级数）；"
+            "化学/生物/政治/地理用 hxzh/swzh/zzzh/dlzh，禁止 hx/sw/zz/dl。"
+            "目标校+班只在排名完成后再 WHERE 过滤。禁止用该班各科均分互相比较，禁止班际报告工具。"
         )
     return (
         "本题是优势/薄弱学科：按该校各科均分的**全市学校排名相对位置**判断"

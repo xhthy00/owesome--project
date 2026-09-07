@@ -6,6 +6,7 @@ import ChatExecutionPanel from "@/components/chat/ChatExecutionPanel";
 import { useChat } from "@/hooks/useChat";
 import { ChatContentContext } from "@/new-components/chat/context";
 import ChatInputPanel from "@/new-components/chat/input/ChatInputPanel";
+import QuestionDock from "@/new-components/chat/input/QuestionDock";
 
 const initConversations = [{ id: "default", title: "Default Assistant" }];
 
@@ -24,6 +25,11 @@ export default function ChatPage() {
     runMetrics,
     metricsByRunId,
     clarifyByRunId,
+    pendingQuestion,
+    questionSubmitting,
+    questionError,
+    replyQuestion,
+    rejectQuestion,
     send,
     stop,
     loadConversation,
@@ -219,6 +225,15 @@ export default function ChatPage() {
                     />
                   </div>
                   <div className="shrink-0 px-5">
+                    {pendingQuestion ? (
+                      <QuestionDock
+                        question={pendingQuestion}
+                        submitting={questionSubmitting}
+                        error={questionError}
+                        onConfirm={replyQuestion}
+                        onCancel={rejectQuestion}
+                      />
+                    ) : null}
                     <ChatInputPanel />
                   </div>
                 </div>

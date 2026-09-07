@@ -1,7 +1,7 @@
 """Chat CRUD operations for conversation management."""
 
-from datetime import datetime
 import json
+from datetime import datetime
 from typing import Any, List, Optional
 
 from sqlalchemy import and_, desc
@@ -47,15 +47,15 @@ def create_conversation(
 def get_conversation_by_id(
     session: Session, conversation_id: int, user_id: int, oid: int | None = None
 ) -> Optional[Conversation]:
-    """Get conversation by ID（按账号；暂不按工作空间过滤）。"""
-    _ = oid
-    statement = select(Conversation).where(
-        and_(
-            Conversation.id == conversation_id,
-            Conversation.user_id == user_id,
-            Conversation.is_deleted == False,  # noqa: E712
-        )
-    )
+    """Get a conversation owned by the current user and workspace."""
+    filters = [
+        Conversation.id == conversation_id,
+        Conversation.user_id == user_id,
+        Conversation.is_deleted == False,  # noqa: E712
+    ]
+    if oid is not None:
+        filters.append(Conversation.oid == oid)
+    statement = select(Conversation).where(and_(*filters))
     return session.exec(statement).first()
 
 

@@ -66,3 +66,32 @@ def test_none_raises():
 def test_unparsable_raises():
     with pytest.raises(ValueError):
         parse_json_tolerant("completely non-json text with no braces")
+
+
+def test_repairs_truncated_object_closing_string_and_braces():
+    """max_tokens 砍在长 SQL 中间：闭合引号与括号后应能还原 tool/args。"""
+    text = '{"tool": "execute_sql", "args": {"sql": "SELECT * FROM tb_score WHERE'
+    assert parse_json_tolerant(text) == {
+        "tool": "execute_sql",
+        "args": {"sql": "SELECT * FROM tb_score WHERE"},
+    }
+
+
+def test_repairs_truncated_object_dropping_partial_key():
+    """截断落在下一个键名上时，丢掉半截键而不是整体解析失败。"""
+    text = '{"tool": "list_tables", "args": {}, "thou'
+    assert parse_json_tolerant(text) == {"tool": "list_tables", "args": {}}
+
+
+def test_repairs_truncated_nested_array():
+    text = '{"tool": "t", "args": {"records": [{"exam": "期中"'
+    assert parse_json_tolerant(text) == {
+        "tool": "t",
+        "args": {"records": [{"exam": "期中"}]},
+    }
+
+
+def test_repair_does_not_hijack_non_json_text():
+    """没有括号的纯文本仍应抛错，不能被修复逻辑吞掉。"""
+    with pytest.raises(ValueError):
+        parse_json_tolerant("我需要先查看成绩表结构，然后编写SQL查询。")

@@ -8,8 +8,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from src.agent.core.agent import AgentMessage
+
 
 @dataclass
 class UserProxyAgent:
     name: str = "user"
     role: str = "User"
+    ask_user: bool = False
+
+    def receive(self, message: AgentMessage) -> None:
+        """Capture an agent action that requires a human response."""
+        report = message.action_report
+        if report is not None and report.ask_user:
+            self.ask_user = True
+
+    def have_ask_user(self) -> bool:
+        return self.ask_user
+
+    def reset(self) -> None:
+        self.ask_user = False

@@ -160,6 +160,12 @@ class ChatRequest(BaseModel):
         return normalize_fullwidth_parentheses(v or "")
 
 
+class QuestionReplyRequest(BaseModel):
+    """Answers for one pending Agentic question request."""
+
+    answers: List[List[str]] = Field(..., min_length=1)
+
+
 class SQLValidationRequest(BaseModel):
     """SQL validation request schema."""
     sql: str = Field(..., min_length=1, max_length=5000, description="SQL query to validate")

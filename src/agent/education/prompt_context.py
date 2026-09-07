@@ -80,6 +80,7 @@ def build_education_sql_hint_text(question: str) -> str:
     # 压缩：只保留关键规则行 + 示例题干
     rules: list[str] = []
     from src.agent.education.query_parse import (
+        is_school_class_comparison_query,
         is_school_vs_school_type_avg_query,
         is_subject_strength_query,
     )
@@ -89,7 +90,15 @@ def build_education_sql_hint_text(question: str) -> str:
             "优势/薄弱学科：按该校（有班则该班）各科均分的全市排名相对位置判断，"
             "名次/参赛数≤25%为前列（优势），≥50%为靠后（薄弱），中间为中游；"
             "禁止把本校各科里名次较差的直接叫薄弱；禁止用本校各科均分互比；"
-            "GROUP BY xx（班级再加 bj）后 RANK()，xsxz='在籍生'，AVG FILTER col>0。"
+            "GROUP BY xx（班级再加 bj）后 RANK() OVER (ORDER BY 均分 DESC) 与 COUNT(*) OVER()，"
+            "禁止 PARTITION BY bj，禁止 COUNT(DISTINCT bj)，"
+            "xsxz='在籍生'，AVG FILTER col>0；化学/生物/政治/地理用 hxzh/swzh/zzzh/dlzh。"
+        )
+    if is_school_class_comparison_query(q):
+        rules.append(
+            "班级横向对比：班级列是 bj 不是 xx；SELECT bj AS class_name，GROUP BY xx, bj；"
+            "禁止 SELECT xx AS class_name，禁止只 GROUP BY xx（会把全校塌成一行）。"
+            "小题为空时仍用学生行按班聚合，禁止手写学校级 AVG。"
         )
     if is_school_vs_school_type_avg_query(q):
         rules.append(

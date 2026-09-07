@@ -788,6 +788,23 @@ async def chat_stream(
     set_trace_id(trace_id)
     if chat_request.datasource_id:
         assert_datasource_accessible(session, current_user, chat_request.datasource_id, workspace_oid)
+    if chat_request.conversation_id:
+        conversation = chat_crud.get_conversation_by_id(
+            session,
+            int(chat_request.conversation_id),
+            current_user.id,
+            workspace_oid,
+        )
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if (
+            conversation.datasource_id is not None
+            and int(conversation.datasource_id) != int(chat_request.datasource_id)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Conversation datasource does not match the request",
+            )
 
     logger.info(
         "chat_stream start mode=%s ds=%s conv=%s user=%s q_len=%d",
@@ -827,6 +844,32 @@ async def chat_stream(
     async def emit_async(event: str, data: dict) -> None:
         queue.put_nowait((event, data))
 
+    async def finalize_active_run(state: str) -> None:
+        if chat_request.agent_mode == "legacy" or not chat_request.conversation_id:
+            return
+
+        def _sync() -> None:
+            from src.chat.crud.agent_run import get_last_agent_run, update_agent_run
+            from src.chat.models.agent_run import RUN_RUNNING
+            from src.common.core.database import get_db_session
+
+            with get_db_session() as cleanup_session:
+                run = get_last_agent_run(
+                    cleanup_session,
+                    conversation_id=int(chat_request.conversation_id),
+                    user_id=current_user_id,
+                    workspace_oid=workspace_oid,
+                )
+                if run is not None and run.state == RUN_RUNNING:
+                    update_agent_run(
+                        cleanup_session,
+                        run,
+                        state=state,
+                        clear_pending=True,
+                    )
+
+        await asyncio.to_thread(_sync)
+
     async def run_agent_branch(team: bool) -> None:
         """单 Agent 或 team 模式的 SSE 执行入口。
 
@@ -851,6 +894,9 @@ async def chat_stream(
             )
         except Exception as e:  # noqa: BLE001
             logger.error(f"Agent chat stream error: {e}")
+            from src.chat.models.agent_run import RUN_FAILED
+
+            await finalize_active_run(RUN_FAILED)
             await emit_async("error", {"error": str(e)})
         finally:
             await emit_async("done", {"record_id": record_id})
@@ -875,29 +921,6 @@ async def chat_stream(
         uid = current_user_id
         persist_q = chat_request.question
         try:
-            from src.agent.adapter.llm_adapter import LangChainLlmClient
-            from src.chat.service.clarification_gate import maybe_clarify_turn
-
-            async def _legacy_emit(event: str, data: dict) -> None:
-                push(event, data)
-
-            gate = asyncio.run(
-                maybe_clarify_turn(
-                    request=chat_request,
-                    current_user_id=uid,
-                    emit=_legacy_emit,
-                    llm_client=LangChainLlmClient(),
-                    persist=True,
-                    workspace_oid=workspace_oid,
-                )
-            )
-            if gate.halted:
-                record_id = gate.record_id
-                return
-            persist_q = gate.persist_question or chat_request.question
-            if gate.effective_question:
-                chat_request.question = gate.effective_question
-
             with get_db_session() as session:
                 generator = SQLGenerator()
 
@@ -1092,25 +1115,39 @@ async def chat_stream(
             loop.call_soon_threadsafe(queue.put_nowait, sentinel)
 
     if chat_request.agent_mode == "legacy":
-        asyncio.create_task(asyncio.to_thread(run_legacy_pipeline))
+        background_task = asyncio.create_task(asyncio.to_thread(run_legacy_pipeline))
     else:
-        asyncio.create_task(run_agent_branch(team=chat_request.agent_mode == "team"))
+        background_task = asyncio.create_task(
+            run_agent_branch(team=chat_request.agent_mode == "team")
+        )
 
     async def event_stream() -> AsyncGenerator[str, None]:
-        while True:
-            try:
-                item = await asyncio.wait_for(queue.get(), timeout=_SSE_KEEPALIVE_INTERVAL)
-            except asyncio.TimeoutError:
-                # 队列进入"静默期"（LLM 往返 / SQL 执行 / 持久化等阶段数十秒无事件）：
-                # 发一行 SSE 注释心跳保活，刷新浏览器↔:3001 之间链路上中间网元
-                # （云 ELB / 企业代理 / 运营商 NAT / Next 代理 body 超时）的空闲计时器，
-                # 避免被按"空闲"掐断导致前端卡死。注释行被前端解析器跳过、不产生事件。
-                yield ": keepalive\n\n"
-                continue
-            if item is sentinel:
-                break
-            event, data = item
-            yield _sse_event(event, data)
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(
+                        queue.get(), timeout=_SSE_KEEPALIVE_INTERVAL
+                    )
+                except asyncio.TimeoutError:
+                    # 刷新浏览器、中间代理和负载均衡器的空闲计时器。
+                    yield ": keepalive\n\n"
+                    continue
+                if item is sentinel:
+                    break
+                event, data = item
+                yield _sse_event(event, data)
+        finally:
+            if not background_task.done():
+                background_task.cancel()
+                await asyncio.gather(background_task, return_exceptions=True)
+                if chat_request.agent_mode != "legacy" and chat_request.conversation_id:
+                    from src.chat.models.agent_run import RUN_CANCELLED
+                    from src.chat.service.question_manager import get_question_manager
+
+                    get_question_manager().remove_for_conversation(
+                        str(chat_request.conversation_id)
+                    )
+                    await finalize_active_run(RUN_CANCELLED)
 
     return StreamingResponse(
         event_stream(),

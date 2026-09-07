@@ -18,9 +18,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.agent.core.agent import AgentMessage
 from src.agent.core.profile import ProfileConfig
 from src.agent.core.react_agent import ReActAgent
-from src.agent.core.agent import AgentMessage
 from src.agent.education.query_parse import format_scope_constraints
 from src.agent.resource.manager import (
     DEFAULT_PACK_NAME,
@@ -70,6 +70,9 @@ DATA_ANALYST_DESC = """[分析范围约束]
    `render_html_report` 产出 HTML，再 `terminate` 简短说明已生成报告。
    报告类任务在调用 `render_html_report` 前不要直接 terminate。
 7. 轮数有上限——尽量每一步都向结论推进，避免重复探查同一张表。
+8. 仅当存在多个同样合理、且无法从权限/历史/schema/工具推断的分析方向时，
+   才调用 `question` 集中询问最少必要选择。硬槽缺失由入口处理；数据库可查信息、
+   SQL 错误和可安全使用默认值的情况禁止追问。
 
 [教育学情分析专章]
 当问题涉及学生成绩 / 班级 / 科目 / 考试 / 学情 时，按以下流程：
@@ -102,6 +105,13 @@ DATA_ANALYST_DESC = """[分析范围约束]
    **禁止**把本校各科里名次较差的直接叫薄弱（全市第7/37仍属前列）。
    **禁止**用本校/本班各科均分互相比较。
    学校：`GROUP BY xx` 后对各科 `AVG FILTER col>0` 做 `RANK()`；班级：`GROUP BY xx,bj`。
+   **班级横向对比**：列必须是 `bj` 不是 `xx`。禁止 `SELECT xx AS class_name`，
+   禁止只 `GROUP BY xx`（会把全校塌成一行）。fetch 无小题时仍走
+   `build_subject_diagnosis_sections_tool`，禁止手写 overview 聚合 SQL。
+   班级全市排名：`RANK() OVER (ORDER BY 均分 DESC)` + `COUNT(*) OVER()`，
+   **禁止** `PARTITION BY bj`，**禁止** `COUNT(DISTINCT bj)`（班名全市重复，不是班级数）。
+   化学/生物/政治/地理用 `hxzh/swzh/zzzh/dlzh`，禁止 `hx/sw/zz/dl`。
+   目标校/班只在排名完成后再过滤。
    **禁止** `build_class_weak_subject_report_data_tool`。
 
 1. **识别报告类型**（class_overview / grade_comparison / subject_diagnosis /

@@ -59,6 +59,14 @@ class ToolPack:
         new_pack._tools = dict(self._tools)
         return new_pack
 
+    def with_tools(self, tools: Iterable[BaseTool]) -> "ToolPack":
+        """Return a new pack containing additional request-scoped tools."""
+        new_pack = ToolPack(bindings=self._bindings)
+        new_pack._tools = dict(self._tools)
+        for tool in tools:
+            new_pack.register(tool)
+        return new_pack
+
     @property
     def bindings(self) -> dict[str, Any]:
         return dict(self._bindings)

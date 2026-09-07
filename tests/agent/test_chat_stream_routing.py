@@ -169,6 +169,57 @@ def test_agent_mode_explicit_legacy_routes_to_sql_generator(monkeypatch):
     assert "stubbed-legacy" in body
 
 
+def test_legacy_mode_does_not_enter_clarification_gate(monkeypatch):
+    flag = _fresh_flag()
+    _patch_agent(monkeypatch, flag)
+    _patch_legacy(monkeypatch, flag)
+
+    async def _unexpected_gate(**_kwargs):
+        raise AssertionError("legacy must not enter HITL clarification")
+
+    monkeypatch.setattr(
+        "src.chat.service.clarification_gate.maybe_clarify_turn",
+        _unexpected_gate,
+    )
+    body = _stream_body(
+        TestClient(_build_app(monkeypatch)),
+        {"question": "模糊教育问题", "datasource_id": 1, "agent_mode": "legacy"},
+    )
+
+    assert flag["legacy_called"] is True
+    assert "stubbed-legacy" in body
+
+
+def test_chat_stream_rejects_foreign_conversation(monkeypatch):
+    app = _build_app(monkeypatch)
+    monkeypatch.setattr(
+        "src.chat.api.chat.chat_crud.get_conversation_by_id",
+        lambda *_args, **_kwargs: None,
+    )
+    response = TestClient(app).post(
+        "/api/v1/chat/chat-stream",
+        json={"question": "hi", "datasource_id": 1, "conversation_id": 99},
+    )
+    assert response.status_code == 404
+
+
+def test_chat_stream_rejects_conversation_datasource_mismatch(monkeypatch):
+    app = _build_app(monkeypatch)
+
+    class Conversation:
+        datasource_id = 2
+
+    monkeypatch.setattr(
+        "src.chat.api.chat.chat_crud.get_conversation_by_id",
+        lambda *_args, **_kwargs: Conversation(),
+    )
+    response = TestClient(app).post(
+        "/api/v1/chat/chat-stream",
+        json={"question": "hi", "datasource_id": 1, "conversation_id": 99},
+    )
+    assert response.status_code == 409
+
+
 def test_agent_mode_rejects_unknown_value(monkeypatch):
     flag = _fresh_flag()
     _patch_agent(monkeypatch, flag)
