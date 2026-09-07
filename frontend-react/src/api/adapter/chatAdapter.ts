@@ -173,6 +173,13 @@ export async function createConversation(payload: { title?: string; datasource_i
   });
 }
 
+export async function updateConversation(id: number, payload: { title?: string; datasource_id?: number }) {
+  return apiRequest<Conversation>(`/chat/conversations/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
 export async function listConversations(limit = 50) {
   const resp = await apiRequest<{ total: number; items: Conversation[] }>(`/chat/conversations?limit=${limit}`);
   return resp.items ?? [];

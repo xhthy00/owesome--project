@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { createConversation, getConversationDetail, sendMessageStream, updateReportReview, replaceRecordReports, type ClarifyPayload } from "@/api/adapter/chatAdapter";
+import { notifyConversationChanged, snippetConversationTitle } from "@/utils/conversationTitle";
 import { genUUID } from "@/utils/uuid";
 import { replaceRecommendationsHtml } from "@/utils/reportRecommendations";
 import { humanizeStepTitle, humanizeTool } from "@/utils/toolLabels";
@@ -356,13 +357,14 @@ export function useChat() {
     });
   }, [clearMetricsTimer]);
 
-  const ensureConversation = useCallback(async (targetDatasourceId: number) => {
+  const ensureConversation = useCallback(async (targetDatasourceId: number, question: string) => {
     if (conversationId) return conversationId;
     const created = await createConversation({
-      title: "New Chat",
+      title: snippetConversationTitle(question),
       datasource_id: targetDatasourceId
     });
     setConversationId(created.id);
+    notifyConversationChanged();
     return created.id;
   }, [conversationId]);
 
@@ -451,7 +453,7 @@ export function useChat() {
 
       let streamAborted = false;
       try {
-        const convId = await ensureConversation(targetDatasourceId);
+        const convId = await ensureConversation(targetDatasourceId, input);
         if (activeRunIdRef.current !== runId) {
           streamAborted = true;
           return;
