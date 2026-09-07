@@ -1,11 +1,14 @@
 import {
   CheckCircleOutlined,
+  CheckOutlined,
+  CopyOutlined,
   DownOutlined,
   ExclamationCircleOutlined,
   LoadingOutlined,
   UserOutlined
 } from "@ant-design/icons";
-import { useEffect, useState } from "react";
+import { message } from "antd";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -41,6 +44,30 @@ function PhaseIcon({ status }: { status: StoryPhase["status"] }) {
   return <span className="inline-block h-2.5 w-2.5 rounded-full bg-[#d1d5db]" />;
 }
 
+/** HTTP 部署下 Clipboard API 不可用时，用隐藏 textarea + execCommand 兜底。 */
+function fallbackCopy(text: string) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.cssText = "position:fixed;left:-9999px;top:-9999px";
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  document.body.removeChild(ta);
+  if (!ok) throw new Error("execCommand copy failed");
+}
+
+async function copyText(text: string) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // 权限拒绝等：走兜底
+    }
+  }
+  fallbackCopy(text);
+}
+
 export default function OpenCodeSessionTurn({
   userMessage,
   assistantMessage,
@@ -56,6 +83,8 @@ export default function OpenCodeSessionTurn({
   runMetrics = null
 }: Props) {
   const [thinkOpen, setThinkOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout>>();
   const [storyOpen, setStoryOpen] = useState(() => Boolean(isWorking));
   const statusLine = activity || (isWorking && !assistantMessage ? ASSISTANT_THINKING : "");
   const phasesToShow = storyPhases.filter((p) => p.status !== "idle");
@@ -74,14 +103,44 @@ export default function OpenCodeSessionTurn({
     setStoryOpen(Boolean(isWorking));
   }, [isWorking]);
 
+  useEffect(() => () => clearTimeout(copiedTimer.current), []);
+
+  const copyQuestion = async () => {
+    const text = (userMessage || "").trim();
+    if (!text) return;
+    try {
+      await copyText(userMessage);
+      setCopied(true);
+      message.success("已复制提问");
+      clearTimeout(copiedTimer.current);
+      copiedTimer.current = setTimeout(() => setCopied(false), 1600);
+    } catch {
+      message.error("复制失败，请手动选择提问内容复制");
+    }
+  };
+
   return (
     <div className="dbgpt-ui-font flex flex-col gap-3 py-2" data-component="session-turn">
       <div className="flex justify-end">
-        <div className="flex max-w-[90%] gap-2">
-          <div className="rounded-2xl bg-white px-4 py-3 shadow-[0_1px_2px_rgba(16,24,40,0.04)] dark:bg-[#2a2b2f]">
-            <div className="whitespace-pre-wrap text-sm font-semibold leading-relaxed text-black dark:text-white">
-              {userMessage}
+        <div className="flex max-w-[90%] items-start gap-2">
+          <div className="flex min-w-0 flex-col items-end gap-1">
+            <div className="rounded-2xl bg-white px-4 py-3 shadow-[0_1px_2px_rgba(16,24,40,0.04)] dark:bg-[#2a2b2f]">
+              <div className="select-text whitespace-pre-wrap text-sm font-semibold leading-relaxed text-black dark:text-white">
+                {userMessage}
+              </div>
             </div>
+            {userMessage.trim() ? (
+              <button
+                type="button"
+                onClick={() => void copyQuestion()}
+                className="inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] text-[#98a2b3] transition-colors hover:bg-[#f2f4f7] hover:text-[#475467] dark:hover:bg-[#1e293b] dark:hover:text-[#cbd5e1]"
+                aria-label="复制提问"
+                title="复制提问"
+              >
+                {copied ? <CheckOutlined /> : <CopyOutlined />}
+                <span>{copied ? "已复制" : "复制"}</span>
+              </button>
+            ) : null}
           </div>
           <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#1677ff] text-white">
             <UserOutlined />
