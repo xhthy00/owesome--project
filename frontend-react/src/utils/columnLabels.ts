@@ -48,6 +48,8 @@ const COLUMN_LABELS: Record<string, string> = {
   stdev: "标准差",
   std: "标准差",
   n_school: "学校数",
+  total_schools: "学校数",
+  city_pct: "全市占比",
   n_class: "班级数",
   gap: "分差",
   pass_line: "及格线",

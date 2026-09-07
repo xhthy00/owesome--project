@@ -174,15 +174,45 @@ body {
 
 /* 对话摘要 Markdown 表格：与学情报告 edu-table 同一套视觉 */
 .edu-md-table-wrap {
-  overflow-x: auto;
   margin: 12px 0;
   border: 1px solid #e8edf3;
   border-radius: 12px;
   background: #fff;
 }
+.edu-md-table-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 8px 0;
+}
+.edu-md-table-fullscreen {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid #d9e2ef;
+  border-radius: 6px;
+  background: #fff;
+  color: #3b82f6;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.edu-md-table-fullscreen:hover {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+.edu-md-table-scroll,
+.edu-md-table-wrap--full {
+  overflow: auto;
+}
+.edu-md-table-wrap--full {
+  margin: 0;
+  max-height: 76vh;
+}
 .edu-md-table-wrap table {
-  width: 100%;
-  min-width: 280px;
+  width: max-content;
+  min-width: 100%;
   margin: 0;
   border-collapse: collapse;
   font-size: 13px;
@@ -194,6 +224,7 @@ body {
   padding: 11px 14px;
   text-align: left;
   vertical-align: middle;
+  white-space: nowrap;
   color: rgba(0, 0, 0, 0.88);
 }
 .edu-md-table-wrap thead th {
@@ -232,6 +263,15 @@ body {
 .dark .edu-md-table-wrap {
   border-color: #2f3441;
   background: #141923;
+}
+.dark .edu-md-table-fullscreen {
+  border-color: #334155;
+  background: #0f172a;
+  color: #93c5fd;
+}
+.dark .edu-md-table-fullscreen:hover {
+  border-color: #60a5fa;
+  background: #172554;
 }
 .dark .edu-md-table-wrap th,
 .dark .edu-md-table-wrap td {

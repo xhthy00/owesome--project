@@ -16,6 +16,27 @@ from src.agent.education.query_parse import (
     normalize_fullwidth_parentheses,
 )
 
+_SCHOOL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_SCHOOL_BOUND_ROLES = frozenset({"teacher", "school_admin", "student"})
+
+
+def _looks_like_school_id(value: str) -> bool:
+    tok = str(value or "").strip()
+    if not tok or re.search(r"[\u4e00-\u9fff]", tok):
+        return False
+    return bool(_SCHOOL_ID_RE.fullmatch(tok))
+
+
+def _is_permission_school_id(hint: str, edu: Mapping[str, Any]) -> bool:
+    """权限已绑的 school_id，不是要拿去对中文校名目录的名字。"""
+    if not _looks_like_school_id(hint):
+        return False
+    role = str(edu.get("edu_role") or "").strip()
+    perm_id = str(edu.get("school_id") or "").strip()
+    if role not in _SCHOOL_BOUND_ROLES or not perm_id:
+        return False
+    return hint == perm_id
+
 
 @dataclass
 class EntityResolveResult:
@@ -103,7 +124,9 @@ def resolve_entities(
             )
 
     school_hint = bound.get(SLOT_SCHOOL) or ""
-    if school_hint and school_cands:
+    # 教师/校管账号只有脱敏 school_id 时，filled 会带 GZ_…；peek 目录是中文 s_name，
+    # 对不上不等于「用户没说哪所学校」。权限已唯一绑校，不再追问。
+    if school_hint and not _is_permission_school_id(school_hint, edu) and school_cands:
         hits = link_values(school_hint, school_cands)
         if len(hits) == 1:
             bound[SLOT_SCHOOL] = hits[0]
