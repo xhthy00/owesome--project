@@ -74,7 +74,11 @@ def _unbound_literals(sql: str, bound: Sequence[str] | None) -> list[str]:
     return bad
 
 
-def lint_edu_sql_blocks(sql: str, bound_literals: Sequence[str] | None = None) -> list[str]:
+def lint_edu_sql_blocks(
+    sql: str,
+    bound_literals: Sequence[str] | None = None,
+    question: str | None = None,
+) -> list[str]:
     """致命项：不得执行。"""
     s = sql or ""
     blocks: list[str] = []
@@ -134,6 +138,33 @@ def lint_edu_sql_blocks(sql: str, bound_literals: Sequence[str] | None = None) -
             "检测到 SELECT 班级别名却只 GROUP BY xx：会把全校塌成一行学校均分。"
             "各班对比必须 SELECT bj AS class_name，GROUP BY xx, bj。"
         )
+    if _dual_class_rank_missing_union(s, question):
+        blocks.append(
+            "班级全市六门排名须一条 SQL 用 UNION ALL 一次返回两个口径"
+            "（按选考方向 + 不区分选考），禁止只查文理混排；"
+            "禁止拆两次 execute_sql（查询结果只保留最后一次）。"
+        )
+    if _class_rank_outer_target_without_neighborhood(s, question):
+        blocks.append(
+            "班级全市排名查询结果须含对照班：第1名 + 目标班名次前后各3名（标记本班）。"
+            "用目标校+班定位窗口（BETWEEN），禁止外层 WHERE 只留下目标班一行。"
+        )
+    if _class_rank_outer_bj_without_school(s):
+        blocks.append(
+            "班级全市排名外层必须同时过滤学校（xx/学校）与班级（bj/班级），"
+            "禁止只滤班级（同名班会串校）。"
+        )
+    if _class_rank_pool_unwashed(s, question):
+        blocks.append(
+            "班级全市排名池须洗掉小班与其他校：xxlb NOT LIKE '%其他%'（中专/职校），"
+            "整班参考人数 HAVING COUNT(*) >= 10。"
+        )
+    if _subject_class_rank_keeps_empty_avg(s, question):
+        blocks.append(
+            "班级单科全市排名须把该科有效人数为 0 的班排除出池："
+            "HAVING COUNT(*) FILTER (WHERE col > 0) >= 3，或 RANK() OVER (ORDER BY 均分 DESC NULLS LAST)；"
+            "禁止缺考/无分班排到第1。"
+        )
     unbound = _unbound_literals(s, bound_literals)
     if unbound:
         blocks.append(
@@ -144,9 +175,13 @@ def lint_edu_sql_blocks(sql: str, bound_literals: Sequence[str] | None = None) -
     return blocks
 
 
-def lint_edu_sql(sql: str, bound_literals: Sequence[str] | None = None) -> list[str]:
+def lint_edu_sql(
+    sql: str,
+    bound_literals: Sequence[str] | None = None,
+    question: str | None = None,
+) -> list[str]:
     """兼容旧接口：返回全部护栏文案（含致命项）。"""
-    return lint_edu_sql_blocks(sql, bound_literals)
+    return lint_edu_sql_blocks(sql, bound_literals, question=question)
 
 
 def _excludes_shibao(sql: str) -> bool:
@@ -206,6 +241,136 @@ def _school_column_aliased_as_class(sql: str) -> bool:
     return bool(
         re.search(r"\bxx\s+AS\s+(?:class_name|班级|bj)\b", s, re.I)
     )
+
+
+def _is_zf6m_class_city_rank_sql(sql: str) -> bool:
+    s = sql or ""
+    if "tb_score_overview" not in s.lower():
+        return False
+    if not re.search(r"\b(?:RANK|DENSE_RANK|ROW_NUMBER)\s*\(", s, re.I):
+        return False
+    if not re.search(r"GROUP\s+BY\s+[^;]*\bbj\b", s, re.I):
+        return False
+    return bool(re.search(r"\bzf6m\b", s, re.I))
+
+
+_SUBJECT_RANK_COL = re.compile(
+    r"\b(?:yw|sx|yy|wl|ls|hxzh|swzh|zzzh|dlzh)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_subject_class_city_rank_sql(sql: str) -> bool:
+    s = sql or ""
+    if "tb_score_overview" not in s.lower():
+        return False
+    if not re.search(r"\b(?:RANK|DENSE_RANK|ROW_NUMBER)\s*\(", s, re.I):
+        return False
+    if not re.search(r"GROUP\s+BY\s+[^;]*\bbj\b", s, re.I):
+        return False
+    return bool(_SUBJECT_RANK_COL.search(s))
+
+
+def _subject_class_rank_keeps_empty_avg(sql: str, question: str | None) -> bool:
+    """单科班级排名未排除无分班，DESC 默认 NULLS FIRST 会把缺考班排第1。"""
+    try:
+        from src.agent.education.query_parse import is_class_subject_city_rank_query
+    except Exception:
+        return False
+    if not is_class_subject_city_rank_query(question or ""):
+        return False
+    if not _is_subject_class_city_rank_sql(sql):
+        return False
+    s = sql or ""
+    if re.search(r"NULLS\s+LAST", s, re.I):
+        return False
+    if re.search(
+        r"HAVING[\s\S]{0,280}(?:IS\s+NOT\s+NULL|FILTER[\s\S]{0,80}>\s*0[\s\S]{0,40}>=\s*[1-9])",
+        s,
+        re.I,
+    ):
+        return False
+    return True
+
+
+def _dual_class_rank_missing_union(sql: str, question: str | None) -> bool:
+    """默认两行口径却只查了混排（无 UNION ALL 或缺两行标签）。"""
+    try:
+        from src.agent.education.query_parse import class_city_rank_answer_mode
+    except Exception:
+        return False
+    if class_city_rank_answer_mode(question or "") != "dual":
+        return False
+    if not _is_zf6m_class_city_rank_sql(sql):
+        return False
+    s = sql or ""
+    # 只拦「没有 UNION ALL」的混排单查。口径列名允许「物理类方向」等，
+    # 不必一字不差写「按选考方向」（否则正确双行 SQL 会被误拦）。
+    return not bool(re.search(r"\bUNION\s+ALL\b", s, re.I))
+
+
+def _class_rank_pool_unwashed(sql: str, question: str | None) -> bool:
+    """班级全市排名未排除其他校/整班不足 10 人。"""
+    try:
+        from src.agent.education.query_parse import (
+            class_city_rank_answer_mode,
+            is_class_subject_city_rank_query,
+        )
+    except Exception:
+        return False
+    q = question or ""
+    if class_city_rank_answer_mode(q):
+        if not _is_zf6m_class_city_rank_sql(sql):
+            return False
+    elif is_class_subject_city_rank_query(q):
+        if not _is_subject_class_city_rank_sql(sql):
+            return False
+    else:
+        return False
+    s = sql or ""
+    has_other = bool(re.search(r"xxlb[^\n;]{0,80}其他", s, re.I))
+    has_min10 = bool(re.search(r"HAVING\s+COUNT\s*\([^)]*\)\s*>=\s*10", s, re.I))
+    return not (has_other and has_min10)
+
+
+def _class_rank_outer_target_without_neighborhood(sql: str, question: str | None) -> bool:
+    """目标班过滤后没有名次窗口 → 摘要只剩一行，看不到前后对照。"""
+    try:
+        from src.agent.education.query_parse import (
+            class_city_rank_answer_mode,
+            is_class_subject_city_rank_query,
+        )
+    except Exception:
+        return False
+    q = question or ""
+    if class_city_rank_answer_mode(q):
+        if not _is_zf6m_class_city_rank_sql(sql):
+            return False
+    elif is_class_subject_city_rank_query(q):
+        if not _is_subject_class_city_rank_sql(sql):
+            return False
+    else:
+        return False
+    s = sql or ""
+    if re.search(r"\bBETWEEN\b", s, re.I):
+        return False
+    has_bj = bool(re.search(r"\b(?:bj|班级)\s*(?:=|LIKE)\s*'", s, re.I))
+    has_xx = bool(re.search(r"\b(?:xx|学校)\s*(?:=|LIKE)\s*'", s, re.I))
+    return has_bj and has_xx
+
+
+def _class_rank_outer_bj_without_school(sql: str) -> bool:
+    """GROUP BY xx,bj 后 RANK，外层只滤班级不滤学校 → 同名班串校。"""
+    s = sql or ""
+    if "tb_score_overview" not in s.lower():
+        return False
+    if not re.search(r"\b(?:RANK|DENSE_RANK|ROW_NUMBER)\s*\(", s, re.I):
+        return False
+    if not re.search(r"GROUP\s+BY\s+[^;]*\bbj\b", s, re.I):
+        return False
+    has_bj = bool(re.search(r"\b(?:bj|班级)\s*(?:=|LIKE)\s*", s, re.I))
+    has_xx = bool(re.search(r"\b(?:xx|学校)\s*(?:=|LIKE)\s*", s, re.I))
+    return has_bj and not has_xx
 
 
 def _class_alias_grouped_by_school_only(sql: str) -> bool:

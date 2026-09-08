@@ -126,6 +126,7 @@ class FactQueryKind(str, Enum):
     SUBJECT_STRENGTH = "subject_strength"      # 优势/薄弱学科（各科均分排名）
     LINE_REACH = "line_reach"                  # 达线/预测线人数或率
     SCORE_STAT = "score_stat"                  # 单场均分/最高分/口语分数问
+    RANK = "rank"                              # 单场排名（班级/学校全市名次）
     VAGUE_OVERALL = "vague_overall"            # 模糊整体（帮我看看/学情如何）
     UNSPECIFIED_EXAM = "unspecified_exam"      # 用「本次/这场」指代但没给专名
 
@@ -140,6 +141,7 @@ REQUIRED_SLOTS_BY_FACT: dict[FactQueryKind, tuple[str, ...]] = {
     FactQueryKind.SUBJECT_STRENGTH: (SLOT_EXAM, SLOT_CLASS, SLOT_SCHOOL),
     FactQueryKind.LINE_REACH: (SLOT_EXAM, SLOT_CLASS, SLOT_SCHOOL),
     FactQueryKind.SCORE_STAT: (SLOT_EXAM, SLOT_CLASS, SLOT_SCHOOL),
+    FactQueryKind.RANK: (SLOT_EXAM, SLOT_CLASS, SLOT_SCHOOL),
     FactQueryKind.VAGUE_OVERALL: (SLOT_EXAM, SLOT_CLASS, SLOT_SCHOOL),
     FactQueryKind.UNSPECIFIED_EXAM: (SLOT_EXAM,),
 }
@@ -184,7 +186,7 @@ _JUDGE_SYSTEM = (
     "- 禁止编造不在问句、不在权限里的班级/学校/考试名\n"
     "- 已有班级但未点名学校、且权限未唯一绑校 → 必须追问 school_name"
     "（多校可有同名班，不能默认某一所）\n"
-    "- 达线/分数线/预测线未点考试专名且候选含 exam_name → 必须追问 exam_name，"
+    "- 达线/分数线/预测线/排名/名次未点考试专名且候选含 exam_name → 必须追问 exam_name，"
     "禁止默认最近一场或某一场考试\n"
     "- 拿不准且候选非空 → need_clarify=true\n"
 )
@@ -298,6 +300,7 @@ def fact_query_kind(question: str) -> FactQueryKind | None:
         is_class_weak_subject_query,
         is_line_reach_query,
         is_oral_score_inquiry,
+        is_rank_query,
         is_score_stat_query,
         is_subject_research_report_query,
         is_subject_strength_query,
@@ -317,6 +320,8 @@ def fact_query_kind(question: str) -> FactQueryKind | None:
         return FactQueryKind.SUBJECT_STRENGTH
     if is_line_reach_query(q):
         return FactQueryKind.LINE_REACH
+    if is_rank_query(q):
+        return FactQueryKind.RANK
     if is_score_stat_query(q) or is_oral_score_inquiry(q):
         return FactQueryKind.SCORE_STAT
     if is_vague_overall_query(q):

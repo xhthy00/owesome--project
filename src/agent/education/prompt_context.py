@@ -80,10 +80,32 @@ def build_education_sql_hint_text(question: str) -> str:
     # 压缩：只保留关键规则行 + 示例题干
     rules: list[str] = []
     from src.agent.education.query_parse import (
+        is_class_city_rank_query,
+        is_class_subject_city_rank_query,
         is_school_class_comparison_query,
         is_school_vs_school_type_avg_query,
         is_subject_strength_query,
     )
+
+    if is_class_city_rank_query(q):
+        rules.append(
+            "班级全市六门排名必须一条 SQL 用 UNION ALL 一次返回两个口径："
+            "按选考方向（人数多的一类，该类满3人进池）+ 不区分选考；"
+            "禁止只报文理混排，禁止拆两次 execute_sql。"
+            "每个口径返回第1名+目标班前后各3名（标记本班），禁止只查出目标班一行。"
+            "排名池排除其他校（xxlb NOT LIKE '%其他%'）和整班不足10人的小班。"
+            "物理类 xkkm LIKE '物%'，历史类 LIKE '史%' OR LIKE '历%'；"
+            "GROUP BY xx,bj 后 RANK() OVER (ORDER BY 均分 DESC)，"
+            "用学校 xx 与班级 bj 定位窗口。"
+        )
+    if is_class_subject_city_rank_query(q):
+        rules.append(
+            "班级单科全市排名：洗净其他校（xxlb NOT LIKE '%其他%'）和整班不足10人的小班；"
+            "该科 FILTER col>0 且 HAVING 有效人数>=3；RANK() OVER (ORDER BY 均分 DESC NULLS LAST)；"
+            "查询结果返回第1名+目标班前后各3名并标记本班，禁止只查出目标班一行；"
+            "用 xx LIKE '%校名%' 与 bj 定位窗口；禁止 UNION ALL 文理双行；"
+            "名次/总数≤25% 称前列，禁止称中上段；结论禁止字段名与 A01 校码。"
+        )
 
     if is_subject_strength_query(q):
         rules.append(

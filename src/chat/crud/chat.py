@@ -232,8 +232,9 @@ def get_conversation_records(
 ) -> List[ConversationRecord]:
     """Get conversation records.
 
-    ``for_history_detail=True`` 时：SELECT 不含 ``tool_calls`` / ``exec_result``，
-    避免历史详情接口从远端库拖数 MB TEXT；计划 / 步骤 / 报告 / 摘要仍完整返回。
+    ``for_history_detail=True`` 时：SELECT 不含 ``tool_calls``，
+    避免历史详情把超长工具轨迹从远端库拖回来。
+    ``exec_result`` 仍返回（落库时已按行数截断），供右侧摘要还原查询表。
     """
     if not for_history_detail:
         statement = (
@@ -292,6 +293,7 @@ def _get_conversation_records_for_history_detail(
                 ConversationRecord.plans,
                 ConversationRecord.sub_task_agents,
                 ConversationRecord.plan_states,
+                ConversationRecord.exec_result,
                 ConversationRecord.summary,
                 ConversationRecord.reports,
                 ConversationRecord.total_tokens,
@@ -305,7 +307,6 @@ def _get_conversation_records_for_history_detail(
     # 禁止后续访问 deferred 列时再发懒加载 SQL
     for rec in records:
         rec.__dict__["tool_calls"] = None
-        rec.__dict__["exec_result"] = None
     return records
 
 

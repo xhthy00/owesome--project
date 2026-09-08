@@ -20,6 +20,18 @@ type Props = {
   height?: number;
 };
 
+/** 名次不宜做柱高：数值越大越差，且不同分母的排名不可比。 */
+export function isRankAxisColumn(name: string): boolean {
+  const n = name.trim();
+  if (!n || /率|占比|比例/.test(n)) return false;
+  return /排名|名次|city_rank|(^|_)rk($|_)|(^|_)rank($|_)/i.test(n);
+}
+
+/** 自动推断的 Y 轴若是名次，摘要里改走数据表，其它图（达线率/均分）不受影响。 */
+export function preferQueryTableOverChart(yField?: string): boolean {
+  return Boolean(yField) && isRankAxisColumn(yField);
+}
+
 /** 数值列打分：优先画率/占比，避免默认落到「参考人数」。 */
 export function scoreYColumn(name: string): number {
   const n = name.toLowerCase();

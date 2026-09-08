@@ -604,6 +604,73 @@ def is_score_stat_query(question: str) -> bool:
     return False
 
 
+_RANK_HINTS = ("排名", "名次", "排第", "第几名")
+
+
+def is_rank_query(question: str) -> bool:
+    """单场排名事实问；历次/趋势不按一场考试追问。"""
+    q = (question or "").strip()
+    if not q:
+        return False
+    if any(h in q for h in _SCORE_STAT_MULTI_EXAM):
+        return False
+    return any(h in q for h in _RANK_HINTS)
+
+
+_TRACK_STRIP_FOR_CLASS_RANK = re.compile(r"物理类|物理方向|历史类|历史方向|理科|文科")
+
+
+def is_class_city_rank_query(question: str) -> bool:
+    """点名班级的全市六门/总分排名（非单科、非优势薄弱）。"""
+    q = (question or "").strip()
+    if not q or not is_rank_query(q):
+        return False
+    if "班" not in q:
+        return False
+    if not any(m in q for m in ("全市", "全域", "市域")):
+        return False
+    if is_subject_strength_query(q):
+        return False
+    stripped = _TRACK_STRIP_FOR_CLASS_RANK.sub("", q)
+    if any(s in stripped for s in _SUBJECT_NAME_TOKENS):
+        return False
+    return True
+
+
+def is_class_subject_city_rank_query(question: str) -> bool:
+    """点名班级的单科全市班级排名（英语/数学等，不是六门总分）。"""
+    q = (question or "").strip()
+    if not q or not is_rank_query(q):
+        return False
+    if "班" not in q:
+        return False
+    if not any(m in q for m in ("全市", "全域", "市域")):
+        return False
+    if is_subject_strength_query(q):
+        return False
+    if is_class_city_rank_query(q):
+        return False
+    stripped = _TRACK_STRIP_FOR_CLASS_RANK.sub("", q)
+    return any(s in stripped for s in _SUBJECT_NAME_TOKENS)
+
+
+def class_city_rank_answer_mode(question: str) -> str:
+    """dual / physics / history / mixed；非本问法返回空串。"""
+    q = (question or "").strip()
+    if not is_class_city_rank_query(q):
+        return ""
+    only_mixed = any(h in q for h in ("不分文理", "所有班级"))
+    only_phy = (not only_mixed) and any(h in q for h in ("物理类", "物理方向", "理科"))
+    only_his = (not only_mixed) and any(h in q for h in ("历史类", "历史方向", "文科"))
+    if only_phy and not only_his:
+        return "physics"
+    if only_his and not only_phy:
+        return "history"
+    if only_mixed:
+        return "mixed"
+    return "dual"
+
+
 def is_oral_score_inquiry(question: str) -> bool:
     """闸门用：口语分数问（含「成绩/情况」），不含报告/多场。"""
     q = (question or "").strip()
@@ -2564,6 +2631,10 @@ __all__ = [
     "is_line_reach_citywide_scope",
     "is_line_reach_query",
     "is_score_stat_query",
+    "is_rank_query",
+    "is_class_city_rank_query",
+    "is_class_subject_city_rank_query",
+    "class_city_rank_answer_mode",
     "is_oral_score_inquiry",
     "has_class_alias",
     "extract_bare_class_number",

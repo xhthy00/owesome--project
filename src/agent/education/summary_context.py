@@ -334,7 +334,9 @@ def result_table_already_in_text(columns: list[Any], text: str) -> bool:
         return all(re.search(rf"\|\s*{re.escape(n)}\s*\|", text or "") for n in probe)
 
     labeled = [display_column_label(c) for c in cols]
-    return _has(cols) or _has(labeled)
+    if _has(cols) or _has(labeled):
+        return True
+    return _result_headers_overlap_markdown(cols, text)
 
 
 def append_keepable_result_tables(
@@ -372,6 +374,50 @@ def append_keepable_result_tables(
 def _is_md_table_line(ln: str) -> bool:
     s = (ln or "").strip()
     return s.startswith("|") and s.count("|") >= 2
+
+
+def _markdown_table_header_cells(text: str) -> list[str]:
+    cells: list[str] = []
+    lines = (text or "").splitlines()
+    for i, ln in enumerate(lines):
+        if not _is_md_table_line(ln):
+            continue
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        if not _is_md_table_line(nxt):
+            continue
+        nxt_cells = [c.strip() for c in nxt.strip().strip("|").split("|")]
+        if not _is_md_table_sep_cells(nxt_cells):
+            continue
+        cells.extend(c.strip() for c in ln.strip().strip("|").split("|") if c.strip())
+    return cells
+
+
+def _header_labels_overlap(a: str, b: str) -> bool:
+    x, y = (a or "").strip(), (b or "").strip()
+    if not x or not y:
+        return False
+    if x == y:
+        return True
+    return len(x) >= 2 and len(y) >= 2 and (x in y or y in x)
+
+
+def _result_headers_overlap_markdown(columns: list[str], text: str) -> bool:
+    """总结改写了表头（口径→排名口径）时，仍视为同一张表已在正文。"""
+    headers = _markdown_table_header_cells(text)
+    if not headers:
+        return False
+    names = [c for c in columns if c] + [display_column_label(c) for c in columns]
+    hit = 0
+    used: set[int] = set()
+    for name in names:
+        for i, header in enumerate(headers):
+            if i in used:
+                continue
+            if _header_labels_overlap(name, header):
+                hit += 1
+                used.add(i)
+                break
+    return hit >= min(3, len(columns))
 
 
 def truncate_keeping_kpi_lines(text: str, *, limit: int = 1200) -> str:

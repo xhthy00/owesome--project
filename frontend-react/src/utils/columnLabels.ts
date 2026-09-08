@@ -1,4 +1,4 @@
-/** 查询结果列名 → 中文表头。未收录的英文名原样展示；已含汉字的不改。 */
+/** 查询结果列名 → 中文表头。未收录的英文名原样展示。 */
 
 const COLUMN_LABELS: Record<string, string> = {
   exam_name: "考试",
@@ -41,6 +41,8 @@ const COLUMN_LABELS: Record<string, string> = {
   city_avg: "全市均分",
   city_rank: "全市排名",
   rank: "排名",
+  rk: "排名",
+  total_classes: "全市班级数",
   scope: "范围",
   ref_count: "参考人数",
   pass_rate: "及格率",
@@ -85,10 +87,36 @@ const COLUMN_LABELS: Record<string, string> = {
   score_rate: "得分率",
 };
 
+const SUBJECT_CODES = ["hxzh", "swzh", "zzzh", "dlzh", "yw", "sx", "yy", "wl", "hx", "sw", "zz", "ls", "dl"];
+const METRIC_CODES = ["avg", "n", "cnt", "count", "rank", "rk"];
+
+function composeSubjectMetric(subjectCode: string, metricCode: string): string | null {
+  const subject = COLUMN_LABELS[subjectCode];
+  const metric = COLUMN_LABELS[metricCode];
+  if (!subject || !metric) return null;
+  return `${subject}${metric}`;
+}
+
 export function labelColumn(name: string): string {
   const raw = (name || "").trim();
   if (!raw) return raw;
-  if (/[\u4e00-\u9fff]/.test(raw)) return raw;
   const key = (raw.split(".").pop() || raw).toLowerCase();
-  return COLUMN_LABELS[key] || raw;
+  if (COLUMN_LABELS[key]) return COLUMN_LABELS[key];
+
+  for (const metric of METRIC_CODES) {
+    if (key.startsWith(`${metric}_`)) {
+      const composed = composeSubjectMetric(key.slice(metric.length + 1), metric);
+      if (composed) return composed;
+    }
+  }
+
+  const mixed = raw.match(/^([\u4e00-\u9fff]+)([a-z]{2,4})$/i);
+  if (mixed) {
+    const prefix = mixed[1];
+    const code = mixed[2].toLowerCase();
+    const subject = COLUMN_LABELS[code];
+    if (subject && SUBJECT_CODES.includes(code)) return `${subject}${prefix}`;
+  }
+
+  return raw;
 }

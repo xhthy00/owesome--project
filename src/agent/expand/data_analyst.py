@@ -110,8 +110,13 @@ DATA_ANALYST_DESC = """[分析范围约束]
    `build_subject_diagnosis_sections_tool`，禁止手写 overview 聚合 SQL。
    班级全市排名：`RANK() OVER (ORDER BY 均分 DESC)` + `COUNT(*) OVER()`，
    **禁止** `PARTITION BY bj`，**禁止** `COUNT(DISTINCT bj)`（班名全市重复，不是班级数）。
+   六门班级全市排名查询结果须含第1名+目标班前后各3名并标记本班；
+   `terminate` 只写目标班两个口径的名次/总数/均分，不要把附近班整表贴进结论。
+   单科全市班级排名还须洗净其他校（`xxlb NOT LIKE '%其他%'`）和整班不足 10 人，
+   该科有效人数 `>= 3` 才进池，`RANK() OVER (ORDER BY 均分 DESC NULLS LAST)`；
+   查询结果须含第1名+目标班前后各3名并标记本班，禁止外层只留下目标班一行；
+   `terminate` 只写目标班均分与第几/共几班；名次/总数≤25% 称前列，禁止称中上段。
    化学/生物/政治/地理用 `hxzh/swzh/zzzh/dlzh`，禁止 `hx/sw/zz/dl`。
-   目标校/班只在排名完成后再过滤。
    **禁止** `build_class_weak_subject_report_data_tool`。
 
 1. **识别报告类型**（class_overview / grade_comparison / subject_diagnosis /

@@ -1996,7 +1996,17 @@ def execute_sql(
     try:
         from src.agent.education.sql_lint import format_lint_blocks, lint_edu_sql_blocks
 
-        blocks = lint_edu_sql_blocks(sql, bound if isinstance(bound, list) else None)
+        q = str(
+            ctx.get("user_question")
+            or (ctx.get("constraints") or {}).get("user_question")
+            or (ctx.get("constraints") or {}).get("question")
+            or ""
+        )
+        blocks = lint_edu_sql_blocks(
+            sql,
+            bound if isinstance(bound, list) else None,
+            question=q or None,
+        )
         if blocks:
             return ToolResult(
                 content=format_lint_blocks(blocks),

@@ -1,9 +1,25 @@
 import { FullscreenOutlined } from "@ant-design/icons";
 import { Modal } from "antd";
-import { useState, type ReactNode } from "react";
+import {
+  Children,
+  createContext,
+  isValidElement,
+  useContext,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode
+} from "react";
 import type { Components } from "react-markdown";
 import { labelColumn } from "@/utils/columnLabels";
 import { formatNumericDisplay } from "@/utils/formatNumericDisplay";
+
+const NumColContext = createContext<{
+  isNumCol: (index: number) => boolean;
+  markNumCol: (index: number) => void;
+}>({ isNumCol: () => false, markNumCol: () => undefined });
+
+const ColIndexContext = createContext(0);
 
 function flattenText(node: ReactNode): string {
   if (node == null || typeof node === "boolean") return "";
@@ -17,12 +33,15 @@ function flattenText(node: ReactNode): string {
 
 function looksLikeNumericHeader(text: string): boolean {
   const t = text.replace(/\s/g, "");
-  return /均分|分差|名次|得分率|及格率|优秀率|差值|数值|对照|人数|满分|排名|率差|学校数|占比|百分位/.test(t);
+  return /均分|分差|名次|得分率|及格率|优秀率|差值|数值|对照|人数|满分|排名|率差|学校数|班级数|占比|百分位/.test(
+    t
+  );
 }
 
 function looksLikeNumericValue(text: string): boolean {
   const t = text.trim().replace(/,/g, "");
   if (!t || t === "—" || t === "-" || t === "–") return false;
+  if (/^第\d+名?$/.test(t)) return true;
   return /^-?\d+(\.\d+)?%?$/.test(t) || /^\d+\s*\/\s*\d+$/.test(t);
 }
 
@@ -39,8 +58,18 @@ function rowLooksWeak(text: string): boolean {
 
 function EduMarkdownTable({ children }: { children?: ReactNode }) {
   const [open, setOpen] = useState(false);
+  const numColsRef = useRef<Set<number>>(new Set());
+  const ctx = useMemo(
+    () => ({
+      isNumCol: (index: number) => numColsRef.current.has(index),
+      markNumCol: (index: number) => {
+        numColsRef.current.add(index);
+      }
+    }),
+    []
+  );
   return (
-    <>
+    <NumColContext.Provider value={ctx}>
       <div className="edu-md-table-wrap">
         <div className="edu-md-table-toolbar">
           <button
@@ -71,31 +100,50 @@ function EduMarkdownTable({ children }: { children?: ReactNode }) {
           <table>{children}</table>
         </div>
       </Modal>
-    </>
+    </NumColContext.Provider>
   );
 }
 
-/** 学情报告同款表格：圆角容器、蓝表头、无竖线、数字右对齐。 */
+function TableRow({ children }: { children?: ReactNode }) {
+  const weak = rowLooksWeak(flattenText(children));
+  return (
+    <tr className={weak ? "is-weak" : undefined}>
+      {Children.toArray(children)
+        .filter((cell) => isValidElement(cell))
+        .map((cell, i) => (
+          <ColIndexContext.Provider key={i} value={i}>
+            {cell}
+          </ColIndexContext.Provider>
+        ))}
+    </tr>
+  );
+}
+
+function TableHeaderCell({ children }: { children?: ReactNode }) {
+  const index = useContext(ColIndexContext);
+  const { markNumCol } = useContext(NumColContext);
+  const labeled = labelColumn(flattenText(children));
+  const num = looksLikeNumericHeader(labeled);
+  if (num) markNumCol(index);
+  return <th className={num ? "num" : undefined}>{labeled}</th>;
+}
+
+function TableDataCell({ children }: { children?: ReactNode }) {
+  const index = useContext(ColIndexContext);
+  const { isNumCol } = useContext(NumColContext);
+  const text = flattenText(children);
+  const formatted = formatNumericDisplay(text);
+  const num = isNumCol(index) || looksLikeNumericValue(formatted);
+  const cls = [num ? "num" : "", looksWeakLabel(formatted) ? "is-weak-label" : ""]
+    .filter(Boolean)
+    .join(" ");
+  return <td className={cls || undefined}>{formatted}</td>;
+}
+
+/** 学情报告同款表格：圆角容器、蓝表头、无竖线、数字列头尾同对齐。 */
 export const eduMarkdownComponents: Components = {
   table: ({ children }) => <EduMarkdownTable>{children}</EduMarkdownTable>,
-  tr: ({ children }) => {
-    const weak = rowLooksWeak(flattenText(children));
-    return <tr className={weak ? "is-weak" : undefined}>{children}</tr>;
-  },
-  th: ({ children }) => {
-    const labeled = labelColumn(flattenText(children));
-    const num = looksLikeNumericHeader(labeled);
-    return <th className={num ? "num" : undefined}>{labeled}</th>;
-  },
-  td: ({ children }) => {
-    const text = flattenText(children);
-    const formatted = formatNumericDisplay(text);
-    const cls = [
-      looksLikeNumericValue(formatted) ? "num" : "",
-      looksWeakLabel(formatted) ? "is-weak-label" : ""
-    ]
-      .filter(Boolean)
-      .join(" ");
-    return <td className={cls || undefined}>{formatted}</td>;
-  }
+  tr: ({ children }) => <TableRow>{children}</TableRow>,
+  th: ({ children }) => <TableHeaderCell>{children}</TableHeaderCell>,
+  td: ({ children }) => <TableDataCell>{children}</TableDataCell>
 };
