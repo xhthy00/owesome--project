@@ -647,6 +647,15 @@ def test_build_default_toolpack_binds_and_hides_params(monkeypatch):
     assert "user_id(" not in prompt
     assert "list_tables:" in prompt
     assert "terminate:" in prompt
+    comprehensive_prompt = prompt.split(
+        "- build_comprehensive_report_data_tool:", 1
+    )[1].split("\n- ", 1)[0]
+    student_prompt = prompt.split(
+        "- build_student_exam_report_data_tool:", 1
+    )[1].split("\n- ", 1)[0]
+    for heavy in ("records(", "rows(", "columns(", "report_data(", "tool_runtime_ctx("):
+        assert heavy not in comprehensive_prompt
+        assert heavy not in student_prompt
 
 
 def test_build_default_toolpack_without_terminate():

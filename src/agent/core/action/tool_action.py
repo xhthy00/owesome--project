@@ -29,7 +29,16 @@ from src.agent.core.action.base import Action, ActionOutput
 from src.agent.resource.tool.base import ToolResult
 from src.agent.resource.tool.builtin import TERMINATE_TOOL_NAME
 from src.agent.resource.tool.pack import ToolNotFoundError, ToolPack
-from src.agent.util.json_parser import parse_json_tolerant
+from src.agent.util.json_parser import (
+    JsonParseError,
+    looks_structurally_truncated,
+    parse_json_tolerant,
+)
+from src.agent.util.tool_call_parser import (
+    looks_like_minimax_tool_xml,
+    parse_minimax_tool_call,
+    strip_think_blocks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -188,8 +197,24 @@ def _sanitize_report_tool_args(
     return out
 
 
-def _should_rescue_report_tool(sub_task: str, ai_message: str) -> str | None:
+def _should_rescue_report_tool(
+    sub_task: str,
+    ai_message: str,
+    *,
+    constraints: dict[str, Any] | None = None,
+) -> str | None:
     """若应自动救援报告工具，返回工具名；否则 None。"""
+    ctx = constraints if isinstance(constraints, dict) else {}
+    route = ctx.get("report_route") if isinstance(ctx.get("report_route"), dict) else {}
+    report_type = str(route.get("report_type") or "")
+    if report_type == "comprehensive":
+        return "build_comprehensive_report_data_tool"
+    if report_type == "student_profile" and (
+        "build_student_exam_report_data_tool" in sub_task
+        or "多次考试" in sub_task
+        or "历次考试" in sub_task
+    ):
+        return "build_student_exam_report_data_tool"
     blob = f"{sub_task}\n{ai_message}".lower()
     student_keys = (
         "build_student_exam_report_data_tool",
@@ -213,7 +238,6 @@ def _should_rescue_report_tool(sub_task: str, ai_message: str) -> str | None:
 def _should_rescue_comprehensive(sub_task: str, ai_message: str) -> bool:
     return _should_rescue_report_tool(sub_task, ai_message) == "build_comprehensive_report_data_tool"
 
-_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.DOTALL | re.IGNORECASE)
 # 同时覆盖裸键 ``tool: name`` 与 JSON 带引号键 ``"tool": "name"``；后者在输出被
 # 截断（如 ``[TOOL_CALL] {"tool": "execute_sql", "args": {"sql": "SELECT``）时是
 # 唯一还能捞回工具名的线索。
@@ -223,38 +247,13 @@ _TOOL_NAME_RE = re.compile(
 #: 值得尝试文本兜底解析的标志：模型原生工具标记，或任意形式的 tool 键。
 _TOOL_MARKER_RE = re.compile(r"""\[TOOL_CALL\]|["']?tool["']?\s*:""", re.IGNORECASE)
 _CLI_ARG_RE = re.compile(r"""--([A-Za-z_][A-Za-z0-9_]*)\s+("([^"]*)"|'([^']*)'|([^\s,}\]]+))""")
-_MINIMAX_INVOKE_RE = re.compile(
-    r"<invoke\b[^>]*\bname\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</invoke>",
-    re.DOTALL | re.IGNORECASE,
-)
-_MINIMAX_PARAM_RE = re.compile(
-    r"<parameter\b[^>]*\bname\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</parameter>",
-    re.DOTALL | re.IGNORECASE,
-)
-
-
 def _looks_like_minimax_tool_xml(text: str) -> bool:
-    blob = str(text or "").lower()
-    return "<invoke" in blob or "minimax:tool_call" in blob
+    return looks_like_minimax_tool_xml(text)
 
 
 def _parse_minimax_tool_call(raw_text: str) -> dict[str, Any] | None:
-    """解析 MiniMax 的 ``<invoke name> / <parameter>`` XML，只取第一项（一轮一工具）。"""
-    if not _looks_like_minimax_tool_xml(raw_text):
-        return None
-    m = _MINIMAX_INVOKE_RE.search(str(raw_text or ""))
-    if not m:
-        return None
-    tool_name = (m.group(1) or "").strip()
-    if not tool_name:
-        return None
-    args: dict[str, Any] = {}
-    for p in _MINIMAX_PARAM_RE.finditer(m.group(2) or ""):
-        key = (p.group(1) or "").strip()
-        if not key:
-            continue
-        args[key] = (p.group(2) or "").strip()
-    return {"tool": tool_name, "args": args}
+    """兼容导出：实际实现位于统一 vendor 协议解析模块。"""
+    return parse_minimax_tool_call(raw_text)
 
 
 def tool_call_fingerprint(tool_name: str, args: dict[str, Any]) -> str:
@@ -326,7 +325,7 @@ class ToolAction(Action):
             )
 
         def _extract_non_json_final_answer(raw_text: str) -> str | None:
-            cleaned = _THINK_BLOCK_RE.sub("", str(raw_text or "")).strip()
+            cleaned = strip_think_blocks(raw_text)
             if not cleaned:
                 return None
             # MiniMax 工具 XML 不是给人看的结论。
@@ -347,7 +346,7 @@ class ToolAction(Action):
             text = str(raw_text or "")
             if not _TOOL_MARKER_RE.search(text):
                 return None
-            cleaned = _THINK_BLOCK_RE.sub("", text)
+            cleaned = strip_think_blocks(text)
             m_tool = _TOOL_NAME_RE.search(cleaned)
             if not m_tool:
                 return None
@@ -413,13 +412,23 @@ class ToolAction(Action):
             )
 
         try:
+            if looks_structurally_truncated(ai_message):
+                raise JsonParseError(str(ai_message or ""), likely_truncated=True)
             parsed = parse_json_tolerant(ai_message)
         except ValueError as e:
-            fallback_tool_call = _parse_tool_call_fallback(ai_message)
+            fallback_tool_call = (
+                None
+                if isinstance(e, JsonParseError) and e.likely_truncated
+                else _parse_tool_call_fallback(ai_message)
+            )
             if fallback_tool_call is not None:
                 parsed = fallback_tool_call
             else:
-                rescue_tool = _should_rescue_report_tool(sub_task, ai_message)
+                rescue_tool = _should_rescue_report_tool(
+                    sub_task,
+                    ai_message,
+                    constraints=constraints,
+                )
                 if rescue_tool:
                     rescued = await _invoke_report_rescue(
                         rescue_tool,
@@ -455,17 +464,39 @@ class ToolAction(Action):
                         )
                     except Exception:
                         logger.exception("fallback terminate failed")
-                msg = (
-                    f"无法从 LLM 输出解析 JSON：{e}. "
-                    "综合/学生报告请只调对应 build_*_report_data_tool（轻量 args），"
-                    "**禁止**手填 records（会截断）。"
+                failure_code = (
+                    "truncated_output"
+                    if isinstance(e, JsonParseError) and e.likely_truncated
+                    else "parse_error"
                 )
+                protocol = (
+                    "minimax_xml"
+                    if _looks_like_minimax_tool_xml(ai_message)
+                    else "json_or_text"
+                )
+                raw_text = str(ai_message or "")
+                raw_hash = hashlib.sha256(raw_text.encode()).hexdigest()[:16]
+                msg = (
+                    f"无法解析 LLM 工具调用：{e}. "
+                    f"[protocol={protocol}, sha256={raw_hash}]"
+                )
+                if rescue_tool:
+                    msg += (
+                        " 综合/学生报告请只调对应 build_*_report_data_tool（轻量 args），"
+                        "**禁止**手填 records。"
+                    )
                 _audit(tool_name=self.name, success=False, args=None, result_preview=msg)
                 return ActionOutput(
                     is_exe_success=False,
                     content=msg,
                     action=self.name,
                     thoughts=None,
+                    extra={
+                        "failure_code": failure_code,
+                        "protocol": protocol,
+                        "raw_length": len(raw_text),
+                        "raw_hash": raw_hash,
+                    },
                 )
 
         if not isinstance(parsed, dict):
@@ -504,6 +535,7 @@ class ToolAction(Action):
                 is_exe_success=False,
                 content=msg,
                 action=self.name,
+                extra={"failure_code": "parse_error", "protocol": "json"},
             )
 
         thoughts = parsed.get("thoughts") or parsed.get("reasoning")
@@ -595,6 +627,7 @@ class ToolAction(Action):
                 content=msg,
                 action=self.name,
                 thoughts=thoughts,
+                extra={"failure_code": "parse_error", "protocol": "json"},
             )
 
         if not isinstance(args, dict):
@@ -605,6 +638,7 @@ class ToolAction(Action):
                 content=msg,
                 action=self.name,
                 thoughts=thoughts,
+                extra={"failure_code": "argument_error", "protocol": "json"},
             )
 
         tool_name_str = str(tool_name)
@@ -674,6 +708,7 @@ class ToolAction(Action):
                 content=msg,
                 action=self.name,
                 thoughts=thoughts,
+                extra={"failure_code": "unknown_tool", "protocol": "json"},
             )
         except TypeError as e:
             msg = f"调用工具 {tool_name} 参数不匹配：{e}"
@@ -683,6 +718,7 @@ class ToolAction(Action):
                 content=msg,
                 action=self.name,
                 thoughts=thoughts,
+                extra={"failure_code": "argument_error", "protocol": "json"},
             )
         except Exception as e:
             logger.exception("Tool %s raised", tool_name)
@@ -693,6 +729,7 @@ class ToolAction(Action):
                 content=msg,
                 action=self.name,
                 thoughts=thoughts,
+                extra={"failure_code": "execution_error"},
             )
 
         _audit(
@@ -701,6 +738,17 @@ class ToolAction(Action):
             args=args,
             result_preview=result.content,
         )
+        result_extra = {
+            "tool_args": dict(args),
+            "tool_data": result.data,
+            "tool_extra": result.extra,
+        }
+        if isinstance(result.data, dict) and result.data.get("error"):
+            result_extra["failure_code"] = (
+                "missing_business_input"
+                if str(result.data.get("error")) in {"missing input", "missing student_name"}
+                else "business_error"
+            )
         action_out = ActionOutput(
             is_exe_success=True,
             content=result.content,
@@ -708,11 +756,7 @@ class ToolAction(Action):
             thoughts=thoughts,
             observations=result.content,
             terminate=result.is_final,
-            extra={
-                "tool_args": dict(args),
-                "tool_data": result.data,
-                "tool_extra": result.extra,
-            },
+            extra=result_extra,
         )
         if (
             isinstance(cache, dict)

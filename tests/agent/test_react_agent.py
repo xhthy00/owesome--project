@@ -39,6 +39,22 @@ class FakeLlmClient:
         return self._replies.pop(0)
 
 
+class SchemaLlmClient:
+    def __init__(self) -> None:
+        self.schemas: list[dict[str, Any]] = []
+
+    async def chat_with_schema(
+        self,
+        messages: list[dict[str, str]],
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.schemas.append(schema)
+        return {"tool": "terminate", "args": {"final_answer": "ok"}}
+
+    async def chat(self, messages: list[dict[str, str]]) -> str:
+        raise AssertionError("structured output should be used")
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -76,8 +92,64 @@ def counted_ping(key: str = "x") -> ToolResult:
     return ToolResult(content=f"ping-{key}-#{_call_counter['n']}")
 
 
+@tool()
+def boom() -> ToolResult:
+    """Always raise."""
+    raise RuntimeError("kaboom")
+
+
+@tool()
+def build_final_report(class_name: str = "", render: bool = True) -> ToolResult:
+    """Build a final report."""
+    return ToolResult(
+        content=f"report:{class_name}:{render}",
+        data={"output_type": "html", "html": "<html>ok</html>"},
+        is_final=True,
+    )
+
+
 def _pack_with(*tools: Any) -> ToolPack:
     return ToolPack(tools=[*tools, TerminateTool()])
+
+
+def test_preselected_tool_call_bypasses_llm_and_terminates():
+    llm = FakeLlmClient(['{"tool":"terminate","args":{"final_answer":"wrong"}}'])
+    agent = _TrivialReActAgent(llm_client=llm, tool_pack=_pack_with(build_final_report))
+
+    reply = _run(
+        agent.generate_reply(
+            received_message=AgentMessage(content="q", role="user"),
+            sender=UserProxyAgent(),
+            preselected_tool_call={
+                "tool": "build_final_report",
+                "args": {"class_name": "高三(1)班", "render": True},
+            },
+        )
+    )
+
+    assert llm.calls == []
+    assert reply.action_report is not None
+    assert reply.action_report.action == "build_final_report"
+    assert reply.action_report.terminate is True
+    assert reply.content == "report:高三(1)班:True"
+
+
+def test_structured_schema_restricts_tool_to_current_pack():
+    llm = SchemaLlmClient()
+    agent = _TrivialReActAgent(llm_client=llm, tool_pack=_pack_with(list_things))
+
+    reply = _run(
+        agent.generate_reply(
+            received_message=AgentMessage(content="q", role="user"),
+            sender=UserProxyAgent(),
+        )
+    )
+
+    assert reply.content == "ok"
+    assert llm.schemas[0]["properties"]["tool"]["enum"] == [
+        "list_things",
+        "terminate",
+    ]
 
 
 def test_react_skips_duplicate_tool_with_same_args():
@@ -401,6 +473,50 @@ def test_react_gives_up_after_consecutive_format_failures():
     assert reply.action_report is not None
     assert reply.action_report.is_exe_success is False
     assert "提前终止" in (reply.action_report.content or "")
+
+
+def test_react_stops_repeated_incomplete_minimax_xml_after_one_repair():
+    garbage = (
+        "<think>调用工具</think>"
+        '<minimax:tool_call><tool_call><tool name="list_thin'
+    )
+    llm = FakeLlmClient([garbage])
+    agent = _TrivialReActAgent(
+        llm_client=llm,
+        tool_pack=_pack_with(list_things),
+        max_react_rounds=15,
+    )
+
+    reply = _run(
+        agent.generate_reply(
+            received_message=AgentMessage(content="q", role="user"),
+            sender=UserProxyAgent(),
+        )
+    )
+
+    assert len(llm.calls) == 2
+    assert reply.action_report is not None
+    assert "MiniMax XML" in reply.action_report.content
+
+
+def test_tool_execution_error_is_not_reported_as_protocol_failure():
+    llm = FakeLlmClient(['{"tool":"boom","args":{}}'])
+    agent = _TrivialReActAgent(
+        llm_client=llm,
+        tool_pack=_pack_with(boom),
+        max_react_rounds=2,
+    )
+
+    reply = _run(
+        agent.generate_reply(
+            received_message=AgentMessage(content="q", role="user"),
+            sender=UserProxyAgent(),
+        )
+    )
+
+    assert reply.action_report is not None
+    assert "kaboom" in reply.action_report.content
+    assert "无法解析模型工具协议" not in reply.action_report.content
 
 
 def test_react_injects_format_repair_hint_after_parse_failure():

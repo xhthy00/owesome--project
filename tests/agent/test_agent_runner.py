@@ -21,6 +21,7 @@ from src.chat.service.agent_runner import (
     _maybe_emit_legacy_sql_result,
     _maybe_emit_report,
     _on_tool_result,
+    _preselected_report_tool_call,
     _RunConstraints,
     _RunState,
     _sql_hits_locked_tables,
@@ -38,6 +39,33 @@ class _ScriptedLlm:
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def test_preselects_only_uniquely_routed_heavy_reports():
+    comprehensive = _RunConstraints(
+        locked_tables=[],
+        required_keywords=[],
+        target_school="扬州中学",
+        target_classes=["高三(1)班"],
+        target_subject="数学",
+        report_route={"needs_report": True, "report_type": "comprehensive"},
+    )
+    call = _preselected_report_tool_call(
+        "调 build_comprehensive_report_data_tool(class_name=高三(1)班)",
+        comprehensive,
+    )
+    assert call == {
+        "tool": "build_comprehensive_report_data_tool",
+        "args": {
+            "render": True,
+            "class_name": "高三(1)班",
+            "school_name": "扬州中学",
+            "subject_name": "数学",
+        },
+    }
+
+    wrong_task = _preselected_report_tool_call("调 execute_sql", comprehensive)
+    assert wrong_task is None
 
 
 _FAKE_SCHEMA = [

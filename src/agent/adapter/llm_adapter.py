@@ -16,6 +16,8 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
+from src.agent.util.tool_call_parser import parse_minimax_tool_call
+
 logger = logging.getLogger(__name__)
 
 # 轻量重试：仅针对网络/连接类错误，避免瞬时抖动直接打断 Agent 链路。
@@ -92,6 +94,18 @@ def _extract_native_tool_call(response: Any) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             args = None
     return {"tool": str(name), "args": args if isinstance(args, dict) else {}}
+
+
+def _response_finish_reason(response: Any) -> str:
+    metadata = getattr(response, "response_metadata", None)
+    if not isinstance(metadata, dict):
+        return ""
+    return str(
+        metadata.get("finish_reason")
+        or metadata.get("stop_reason")
+        or (metadata.get("token_usage") or {}).get("finish_reason")
+        or ""
+    )
 
 
 def _truncate_observation_for_llm(text: str, *, limit: int = _MAX_OBSERVATION_CHARS) -> str:
@@ -230,6 +244,19 @@ class LangChainLlmClient:
 
         text = _response_text(response)
         native = _extract_native_tool_call(response)
+        finish_reason = _response_finish_reason(response)
+        logger.info(
+            "LLM response shape=%s content_length=%d finish_reason=%s native_tool_call=%s",
+            type(response).__name__,
+            len(text),
+            finish_reason or "unknown",
+            bool(native),
+        )
+        if finish_reason.lower() in {"length", "max_tokens", "max_output_tokens"}:
+            logger.warning(
+                "LLM response ended because of token limit; content_length=%d",
+                len(text),
+            )
         if native is not None:
             thoughts = text.strip()
             if thoughts:
@@ -239,6 +266,13 @@ class LangChainLlmClient:
                 native.get("tool"),
             )
             return json.dumps(native, ensure_ascii=False)
+        vendor_call = parse_minimax_tool_call(text)
+        if vendor_call is not None:
+            logger.info(
+                "LLM returned a MiniMax XML tool_call for %r; normalized to ReAct JSON",
+                vendor_call.get("tool"),
+            )
+            return json.dumps(vendor_call, ensure_ascii=False)
         return text
 
     @staticmethod

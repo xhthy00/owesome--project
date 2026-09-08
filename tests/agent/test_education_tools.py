@@ -1165,6 +1165,32 @@ def test_build_comprehensive_report_data_tool_long_table_input():
     assert "<strong>s1</strong>" in data["STUDENT_ARCHIVE_TABLE"]
 
 
+def test_build_comprehensive_rejects_kpi_only_upstream():
+    report_data = {
+        "sub_tasks": [
+            {
+                "sub_task_agent": "DataAnalyst",
+                "exec_result": {
+                    "columns": ["class_name", "avg_score", "pass_rate"],
+                    "rows": [["高三(1)班", 102.5, 88.0]],
+                    "row_count": 1,
+                },
+            }
+        ]
+    }
+
+    result = _run(
+        build_comprehensive_report_data_tool.execute(
+            class_name="高三(1)班",
+            report_data=report_data,
+            tool_runtime_ctx={"report_data": report_data},
+        )
+    )
+
+    assert result.data["error"] == "missing input"
+    assert "学生×考试明细" in result.content
+
+
 def test_build_comprehensive_report_data_tool_renders_html_payload():
     """render=True（默认）：工具直接返回 HTML 上报载荷，无需 LLM 再调 render_html_report。"""
     result = _run(

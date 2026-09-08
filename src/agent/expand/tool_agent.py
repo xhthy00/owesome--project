@@ -41,8 +41,10 @@ TOOL_AGENT_DESC = """[分析范围约束]
 - 仅当多个执行方向都合理且无法从权限、历史、schema 或工具推断时调用 `question`；
   不要用它询问硬槽、数据库可查信息或 SQL 错误。
 
-[教育学情报告组装 — 严格流程]
-当子任务是"组装学情/成绩分析 HTML 报告"时，**严禁直接写出 HTML 文档、
+[教育学情普通模板报告组装 — 严格流程]
+以下 1-4 步只适用于没有专用 `build_*_report_data_tool` 的普通模板报告；
+综合分析和单个学生多次考试必须走后文快捷路径，不得先选模板。当子任务是
+"组装学情/成绩分析 HTML 报告"时，**严禁直接写出 HTML 文档、
 Word/PDF 内容或自然语言报告正文**；必须按以下工具调用流程完成：
 1. 先调 `select_report_template_tool(report_type, audience)` 获取
    `template_name`（形如 `education/xxx.html`）与 `data_keys`（模板需要的字段列表）；

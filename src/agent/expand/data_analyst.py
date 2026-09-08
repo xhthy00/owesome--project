@@ -153,16 +153,19 @@ DATA_ANALYST_DESC = """[分析范围约束]
    知识点得分率 → `"knowledge_bar"` 或 `"bar"`+`categories`/`values`；
    各科雷达 → `"subject_radar"` 或 `"radar"`；班级对比 → `"class_compare_bar"`。
    **禁止**使用裸 `chart_type` 以外的未支持名称；`bar`/`column`/`line` 已支持别名自动映射。
-5. **报告生成**：
-   - **全班/多次考试综合分析**（含「所有考试」「历次考试」，须已点名班级）→ 调 `build_comprehensive_report_data_tool(class_name=...)`
-     （完整 SQL 由工具自动读取，**禁止**只抄 preview 20 行），再 `terminate`；
+5. **报告生成**：Team 模式中 DataAnalyst 只查数，报告统一由后续 ToolExpert 组装；
+   仅当当前子任务明确指定报告 builder 时才可调用。
+   - **全班/多次考试综合分析**（含「所有考试」「历次考试」，须已点名班级）→
+     先查学生×考试全量明细；由 ToolExpert 调
+     `build_comprehensive_report_data_tool(class_name=...)`，**禁止**复制 preview；
      **禁止**把多场考试塞进 `build_subject_diagnosis_sections_tool`（会把人次累加、无考试对比）；
      **禁止**把「各校/各学校」或「高三1月」当成某个班（如高三(1)班）去做综合报告；
    - **各校/各学校 + 考试分析**（未点名班级）或全市结构化诊断 → 调 `build_diagnostic_report_data_tool(scope_label=全市, render=true)`；
      **禁止** `build_comprehensive_report_data_tool`；**禁止** fetch 小题；
      **禁止** DataAnalyst 直接调 `build_citywide_exam_analysis_report_tool`；
    - **多维聚合/交叉分析** → `aggregate_dimension_tool` / `cross_analyze_tool`；
-   - **单个学生多次考试分析** → 调 `build_student_exam_report_data_tool(student_name=...)`，
+   - **单个学生多次考试分析** → 先查该生及全班历次明细；由 ToolExpert 调
+     `build_student_exam_report_data_tool(student_name=...)`，
      `student_name` 必须与用户指定学生一致，**只为该学生生成一份报告**；
      全班数据由工具自动读取，**禁止**只传 preview 行；
    - **单个学生 + 单次考试「得分情况/成绩」** → **不要**只查总分后 terminate；

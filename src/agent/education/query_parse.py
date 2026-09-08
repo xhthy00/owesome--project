@@ -101,6 +101,9 @@ _TOP_STUDENT_LOOKUP_HINTS = (
     "谁考得最好",
     "谁考第一",
     "第一名是谁",
+    "班级第一是谁",
+    "年级第一是谁",
+    "全校第一是谁",
     "成绩最好的是谁",
     "分数最高的学生",
     "最高分的学生是谁",
@@ -609,7 +612,20 @@ def is_score_stat_query(question: str) -> bool:
     return False
 
 
-_RANK_HINTS = ("排名", "名次", "排第", "第几名")
+_RANK_HINTS = (
+    "排名",
+    "名次",
+    "排第",
+    "第几名",
+    "第一名",
+    "班级第一",
+    "年级第一",
+    "全校第一",
+    "冠军",
+    "最高者",
+)
+_ORDINAL_ITEM_RE = re.compile(r"第\s*[一二三四五六七八九十百\d]+\s*(?:小题|题)")
+_TOP_PERSON_RE = re.compile(r"第一\s*(?:是谁|的(?:学生|同学)|$)")
 
 
 def is_rank_query(question: str) -> bool:
@@ -619,7 +635,9 @@ def is_rank_query(question: str) -> bool:
         return False
     if any(h in q for h in _SCORE_STAT_MULTI_EXAM):
         return False
-    return any(h in q for h in _RANK_HINTS)
+    # “第一小题”是题号，不是名次；先移除题号片段再匹配“第一”等排名表达。
+    q = _ORDINAL_ITEM_RE.sub("", q)
+    return any(h in q for h in _RANK_HINTS) or bool(_TOP_PERSON_RE.search(q))
 
 
 _TRACK_STRIP_FOR_CLASS_RANK = re.compile(r"物理类|物理方向|历史类|历史方向|理科|文科")
@@ -2404,12 +2422,9 @@ def resolve_comprehensive_table_input(
             best = er
             best_key = key
 
-    # 上游是学生明细且明显更全，或 LLM 未传数据 → 改用上游
+    # 仅学生级成绩明细可作为报告输入。班级 KPI 聚合即使行数更多也不能回退使用，
+    # 否则会被误当成长表聚合成空 records，最终生成残缺报告或触发 IndexError。
     if best and best_key[0] == 1 and (best_key[1] > llm_n or llm_n == 0):
-        return None, list(best["rows"]), [str(c) for c in best["columns"]], True
-    if best and best_key[1] > llm_n:
-        return None, list(best["rows"]), [str(c) for c in best["columns"]], True
-    if llm_n == 0 and best:
         return None, list(best["rows"]), [str(c) for c in best["columns"]], True
     return records, rows, columns, False
 

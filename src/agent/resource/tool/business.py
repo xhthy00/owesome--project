@@ -2345,7 +2345,24 @@ def build_default_toolpack(
     tools: list[Any] = list(default_business_tools())
     if include_terminate:
         tools.append(TerminateTool())
-    pack = ToolPack(tools=tools)
+    heavy_report_args = {
+        "records",
+        "rows",
+        "columns",
+        "exec_result",
+        "score_rows",
+        "fetch_data",
+        "item_rows",
+        "knowledge_rows",
+        "report_data",
+        "tool_runtime_ctx",
+    }
+    pack = ToolPack(tools=tools).hide_parameters(
+        {
+            "build_comprehensive_report_data_tool": heavy_report_args,
+            "build_student_exam_report_data_tool": heavy_report_args,
+        }
+    )
 
     bindings: dict[str, Any] = {}
     if datasource_id is not None:

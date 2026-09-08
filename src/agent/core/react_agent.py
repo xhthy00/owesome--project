@@ -45,6 +45,7 @@ _REPEAT_TOOL_WARN_THRESHOLD = 3
 #: 这类失败不像工具业务失败那样能带来新信息：模型每轮看到几乎相同的上下文，
 #: 会稳定复现同一个格式错误，继续跑只是把 max_react_rounds 烧光再报同一条错。
 _MAX_CONSECUTIVE_FORMAT_FAILURES = 3
+_MAX_REPEATED_VENDOR_PROTOCOL_FAILURES = 2
 
 #: 解析失败后注入下一轮 prompt 的强制纠偏指令。比 observation 回灌更硬——
 #: observation 是"系统告诉我 Y"，容易被长 system prompt 淹没；fail_reason 直接
@@ -52,7 +53,8 @@ _MAX_CONSECUTIVE_FORMAT_FAILURES = 3
 _FORMAT_REPAIR_HINT = (
     "你上一轮的输出无法被解析成工具调用。原因：{reason}\n"
     "从现在起**只**输出一个 JSON 对象，前后不要有任何解释、前言、Markdown 代码块，"
-    "也不要使用 `[TOOL_CALL]`、`<invoke>` 这类模型原生的工具调用标记：\n"
+    "优先不要使用 `[TOOL_CALL]`、`<invoke>` 这类模型原生标记；"
+    "若模型服务强制生成原生工具调用，则所有 XML 标签与参数必须完整闭合：\n"
     '{{"thoughts": "一句话说明理由", "tool": "工具名", "args": {{}}}}\n'
     "把 args 保持精简；已有信息足够时直接调用 `terminate`，结论写进 args.final_answer。"
 )
@@ -107,7 +109,17 @@ class ReActAgent(ConversableAgent):
         chat_with_schema = getattr(self.llm_client, "chat_with_schema", None)
         if callable(chat_with_schema):
             try:
-                obj = await chat_with_schema(messages, self._TOOL_CALL_SCHEMA)
+                schema = {
+                    **self._TOOL_CALL_SCHEMA,
+                    "properties": {
+                        **self._TOOL_CALL_SCHEMA["properties"],
+                        "tool": {
+                            "type": "string",
+                            "enum": self.tool_pack.names(),
+                        },
+                    },
+                }
+                obj = await chat_with_schema(messages, schema)
                 if isinstance(obj, dict):
                     return json.dumps(obj, ensure_ascii=False)
             except Exception:
@@ -142,11 +154,20 @@ class ReActAgent(ConversableAgent):
         last_tool_name: str | None = None
         tool_streak: int = 0
         tool_call_cache: dict[str, ActionOutput] = {}
+        preselected_tool_call = kwargs.pop("preselected_tool_call", None)
+        if not (
+            isinstance(preselected_tool_call, dict)
+            and isinstance(preselected_tool_call.get("tool"), str)
+            and isinstance(preselected_tool_call.get("args", {}), dict)
+            and preselected_tool_call["tool"] in self.tool_pack
+        ):
+            preselected_tool_call = None
         # 格式失败（JSON 解析不出 / 缺 tool / 未知工具）单独计数：它与工具业务失败
         # 不同，重跑不会带来新信息，必须靠 fail_reason 纠偏并在连续失败时尽早退出。
         format_failures: int = 0
         format_fail_reason: str | None = None
         gave_up_on_format = False
+        repeated_vendor_failure = False
 
         for round_idx in range(self.max_react_rounds):
             reply.rounds = round_idx + 1
@@ -157,7 +178,10 @@ class ReActAgent(ConversableAgent):
                 reply=reply,
                 fail_reason=format_fail_reason,
             )
-            llm_text = await self.thinking(messages, sender)
+            if round_idx == 0 and preselected_tool_call is not None:
+                llm_text = json.dumps(preselected_tool_call, ensure_ascii=False)
+            else:
+                llm_text = await self.thinking(messages, sender)
             reply.content = llm_text
 
             await self._emit(
@@ -176,6 +200,21 @@ class ReActAgent(ConversableAgent):
                 **kwargs,
             )
             elapsed_ms = int((time.time() - t0) * 1000)
+            if round_idx == 0 and preselected_tool_call is not None:
+                tool_data = (action_out.extra or {}).get("tool_data")
+                if isinstance(tool_data, dict) and tool_data.get("error"):
+                    action_out = ActionOutput(
+                        is_exe_success=False,
+                        content=action_out.content,
+                        action=action_out.action,
+                        thoughts=action_out.thoughts,
+                        observations=action_out.observations,
+                        have_retry=False,
+                        extra={
+                            **dict(action_out.extra or {}),
+                            "failure_code": "missing_business_input",
+                        },
+                    )
             reply.action_report = action_out
             last_action_out = action_out
 
@@ -192,8 +231,11 @@ class ReActAgent(ConversableAgent):
                 return reply
 
             # ToolAction 把所有"没解析出一个可执行工具"的情况都标成 action="tool_call"。
-            is_format_failure = (
-                not action_out.is_exe_success and action_out.action == ToolAction.name
+            failure_code = str((action_out.extra or {}).get("failure_code") or "")
+            is_format_failure = not action_out.is_exe_success and (
+                failure_code
+                in {"parse_error", "truncated_output", "unknown_tool", "argument_error"}
+                or (not failure_code and action_out.action == ToolAction.name)
             )
             if is_format_failure:
                 format_failures += 1
@@ -254,6 +296,18 @@ class ReActAgent(ConversableAgent):
                     reply.rounds,
                 )
                 break
+            if (
+                format_failures >= _MAX_REPEATED_VENDOR_PROTOCOL_FAILURES
+                and (action_out.extra or {}).get("protocol") == "minimax_xml"
+            ):
+                gave_up_on_format = True
+                repeated_vendor_failure = True
+                logger.error(
+                    "[%s] repeated invalid MiniMax XML protocol at round %d",
+                    self.name,
+                    reply.rounds,
+                )
+                break
 
             if not action_out.have_retry:
                 logger.info(
@@ -293,11 +347,20 @@ class ReActAgent(ConversableAgent):
             )
         else:
             if gave_up_on_format:
-                headline = (
-                    f"连续 {_MAX_CONSECUTIVE_FORMAT_FAILURES} 轮无法把模型输出解析成工具调用，"
-                    f"已提前终止（未耗尽 {self.max_react_rounds} 轮）。"
-                    "多为模型未遵循 JSON 工具协议或输出被截断，请重试或更换模型。"
-                )
+                failure_code = str((last_action_out.extra or {}).get("failure_code") or "")
+                if repeated_vendor_failure:
+                    headline = "模型连续返回无法完整解析的 MiniMax XML 工具调用，已停止重复重试。"
+                elif failure_code == "truncated_output":
+                    headline = "模型连续返回结构不完整的工具调用，疑似响应被截断，已提前终止。"
+                elif failure_code == "unknown_tool":
+                    headline = "模型连续选择不可用工具，已提前终止。"
+                elif failure_code == "argument_error":
+                    headline = "模型连续生成不匹配的工具参数，已提前终止。"
+                else:
+                    headline = (
+                        f"连续 {_MAX_CONSECUTIVE_FORMAT_FAILURES} 轮无法解析模型工具协议，"
+                        f"已提前终止（未耗尽 {self.max_react_rounds} 轮）。"
+                    )
             else:
                 headline = f"达到最大 ReAct 轮数 ({self.max_react_rounds}) 仍未调用 terminate。"
             reply.action_report = ActionOutput(

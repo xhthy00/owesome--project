@@ -304,6 +304,7 @@ def fact_query_kind(question: str) -> FactQueryKind | None:
         is_score_stat_query,
         is_subject_research_report_query,
         is_subject_strength_query,
+        is_top_student_lookup_query,
         refers_to_unspecified_exam,
     )
 
@@ -320,7 +321,7 @@ def fact_query_kind(question: str) -> FactQueryKind | None:
         return FactQueryKind.SUBJECT_STRENGTH
     if is_line_reach_query(q):
         return FactQueryKind.LINE_REACH
-    if is_rank_query(q):
+    if is_rank_query(q) or is_top_student_lookup_query(q):
         return FactQueryKind.RANK
     if is_score_stat_query(q) or is_oral_score_inquiry(q):
         return FactQueryKind.SCORE_STAT
