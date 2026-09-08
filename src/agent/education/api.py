@@ -684,7 +684,9 @@ _SCHOOL_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 def _school_sql_filter(school_name: str) -> str:
     """目录筛选：脱敏 school_id 走编号等值，中文校名走 s_name/name LIKE。"""
-    n = (school_name or "").strip()
+    from src.agent.education.query_parse import peel_rhetorical_school_suffix
+
+    n = peel_rhetorical_school_suffix((school_name or "").strip())
     q = _sql_quote(n)
     if _SCHOOL_TOKEN_RE.fullmatch(n) and not re.search(r"[\u4e00-\u9fff]", n):
         return f"sc.school_id = '{q}'"

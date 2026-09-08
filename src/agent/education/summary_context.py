@@ -182,6 +182,30 @@ def _sql_preview_limit(sql: str | None) -> int | None:
         return None
 
 
+# 仅分母/规模的单列表：中间步骤用，不进「### 查询结果」
+_DENOMINATOR_ONLY_COLS = frozenset(
+    {
+        "school_count",
+        "total_schools",
+        "n_school",
+        "class_count",
+        "total_classes",
+        "n_class",
+    }
+)
+
+
+def _col_key(col: str) -> str:
+    return re.sub(r"[\s\-]+", "_", str(col or "").strip()).lower()
+
+
+def _is_denominator_only_table(cols: list[str]) -> bool:
+    """单列且仅为参赛学校数/班级数等分母，不是用户要看的结果表。"""
+    if len(cols) != 1:
+        return False
+    return _col_key(cols[0]) in _DENOMINATOR_ONLY_COLS
+
+
 def looks_like_keepable_result_table(
     columns: list[Any],
     *,
@@ -191,6 +215,8 @@ def looks_like_keepable_result_table(
     """对比/排名/各科小表应进最终结论；学生明细预览表不进。"""
     cols = [str(c).strip() for c in (columns or []) if str(c).strip()]
     if not cols or row_count <= 0:
+        return False
+    if _is_denominator_only_table(cols):
         return False
     blob = " ".join(cols)
     n = int(row_count)
@@ -206,6 +232,105 @@ def looks_like_keepable_result_table(
     return n <= 15 and len(cols) <= 12
 
 
+_SUBJECT_LABELS = ("语文", "数学", "英语", "物理", "化学", "生物", "政治", "历史", "地理")
+_SUBJECT_AVG_COL = re.compile(
+    r"^(" + "|".join(_SUBJECT_LABELS) + r")(均分|平均分)$"
+)
+_SUBJECT_RANK_COL = re.compile(
+    r"^(" + "|".join(_SUBJECT_LABELS) + r")(排名|校排|班排|名次)$"
+)
+_SCHOOL_COL_KEYS = frozenset({"学校", "school", "school_name", "xx", "s_name"})
+_POOL_COL_RE = re.compile(
+    r"全市学校数|参赛校数|参赛学校数|学校数|n_school|school_count|total_schools",
+    re.IGNORECASE,
+)
+
+
+def try_unpivot_wide_subject_rank_table(
+    columns: list[Any],
+    rows: list[Any],
+) -> tuple[list[str], list[list[Any]]] | None:
+    """把「语文均分/语文排名/…」一行宽表转成一科一行；不匹配则返回 None。
+
+    仅当 ≥2 科同时具备均分列与排名列、且尚无「学科」列时生效，避免误伤其它宽表。
+    """
+    cols = [str(c).strip() for c in (columns or [])]
+    if len(cols) < 4 or not rows:
+        return None
+    if any(_col_key(c) in {"学科", "subject", "subject_name"} for c in cols):
+        return None
+
+    school_idx: int | None = None
+    pool_idx: int | None = None
+    pair: dict[str, list[int | None]] = {}
+    order: list[str] = []
+
+    for i, c in enumerate(cols):
+        key = _col_key(c)
+        if school_idx is None and (key in _SCHOOL_COL_KEYS or c.endswith("学校")):
+            school_idx = i
+            continue
+        if pool_idx is None and _POOL_COL_RE.search(c):
+            pool_idx = i
+            continue
+        m_avg = _SUBJECT_AVG_COL.match(c)
+        if m_avg:
+            subj = m_avg.group(1)
+            pair.setdefault(subj, [None, None])[0] = i
+            if subj not in order:
+                order.append(subj)
+            continue
+        m_rank = _SUBJECT_RANK_COL.match(c)
+        if m_rank:
+            subj = m_rank.group(1)
+            pair.setdefault(subj, [None, None])[1] = i
+            if subj not in order:
+                order.append(subj)
+
+    complete = [
+        (s, pair[s][0], pair[s][1])
+        for s in order
+        if pair.get(s) and pair[s][0] is not None and pair[s][1] is not None
+    ]
+    if len(complete) < 2:
+        return None
+
+    out_cols = ["学科", "均分", "全市排名", "参赛校数"]
+    if school_idx is not None:
+        out_cols = ["学校", *out_cols]
+
+    out_rows: list[list[Any]] = []
+    for raw in rows:
+        if not isinstance(raw, (list, tuple)):
+            continue
+        school = raw[school_idx] if school_idx is not None and school_idx < len(raw) else None
+        pool = raw[pool_idx] if pool_idx is not None and pool_idx < len(raw) else None
+        for subj, ai, ri in complete:
+            assert ai is not None and ri is not None
+            avg = raw[ai] if ai < len(raw) else None
+            rank = raw[ri] if ri < len(raw) else None
+            rank_val: Any = rank
+            pool_val: Any = pool
+            if isinstance(rank, str) and "/" in rank:
+                left, _, right = rank.partition("/")
+                rank_val = left.strip()
+                if pool_val is None:
+                    right = right.strip()
+                    try:
+                        pool_val = int(right)
+                    except (TypeError, ValueError):
+                        pool_val = right
+            row_out: list[Any] = []
+            if school_idx is not None:
+                row_out.append(school)
+            row_out.extend([subj, avg, rank_val, pool_val])
+            out_rows.append(row_out)
+
+    if not out_rows:
+        return None
+    return out_cols, out_rows
+
+
 _RESULT_COL_LABELS = {
     "scope": "范围",
     "subject": "学科",
@@ -219,7 +344,11 @@ _RESULT_COL_LABELS = {
     "cnt": "人数",
     "count": "人数",
     "n_school": "学校数",
+    "school_count": "学校数",
+    "total_schools": "学校数",
     "n_class": "班级数",
+    "class_count": "班级数",
+    "total_classes": "班级数",
     "pass_rate": "及格率",
     "excellent_rate": "优秀率",
     "stdev": "标准差",
@@ -1305,5 +1434,6 @@ __all__ = [
     "scrub_residual_conflicting_values",
     "sql_looks_paginated",
     "sql_looks_row_capped",
+    "try_unpivot_wide_subject_rank_table",
     "truncate_keeping_kpi_lines",
 ]

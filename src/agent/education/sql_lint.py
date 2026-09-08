@@ -5,6 +5,13 @@ from __future__ import annotations
 import re
 from typing import Sequence
 
+try:
+    import sqlglot
+    from sqlglot import exp as _sg_exp
+except Exception:  # pragma: no cover - 运行环境缺 sqlglot 时跳过 AST 规则
+    sqlglot = None  # type: ignore[assignment]
+    _sg_exp = None  # type: ignore[assignment]
+
 _AVG_REACH = re.compile(r"\bAVG\s*\(\s*reach_rate\s*\)", re.IGNORECASE)
 _MONTH_DISTRICT = re.compile(r"'月[\u4e00-\u9fff]{1,6}区'")
 _SUBJECT_COLS = (
@@ -56,6 +63,609 @@ _COUNT_DISTINCT_BJ = re.compile(
     r"COUNT\s*\(\s*DISTINCT\s+(?:[\w]+\.)?bj\s*\)",
     re.IGNORECASE,
 )
+_RANK_FN = re.compile(r"\b(?:RANK|DENSE_RANK)\s*\(", re.IGNORECASE)
+_SCOPE_COL = re.compile(
+    r"\b(?:xx|school_name|s_name|school_code|bj|class_name)\b",
+    re.IGNORECASE,
+)
+_SCOPE_PRED = re.compile(
+    r"\b(?:(?:[\w]+\.)?(?:xx|school_name|s_name|school_code|bj|class_name))\s*"
+    r"(?:LIKE|=|IN\s*\(|ILIKE)",
+    re.IGNORECASE,
+)
+_RANK_RESULT_COL = re.compile(
+    # rank_yw / yw_rank：\brank\b 不匹配下划线词中段，须显式 rank_ / _rank
+    r"排名|校排|班排|名次|city_rank|全市第|rank_|_rank|\brank\b|rk_|_rk\b",
+    re.IGNORECASE,
+)
+_RANK_POOL_SHRINK_MSG = (
+    "检测到全市排名窗口与目标校/班过滤写在同一层，或仅用 EXISTS 代替外层过滤："
+    "WHERE 会先把参赛池收成 1 行/校，RANK 必然全是第 1，或结果表混入他校第 1 行。"
+    "必须先对全市 GROUP BY xx（班级再加 bj）做 RANK()/COUNT(*) OVER()，"
+    "再在外层 WHERE xx/bj 过滤目标；禁止同层 WHERE 校/班，禁止只用 EXISTS 判断目标校是否存在。"
+)
+_SUBJECT_RANK_NULL_POOL_MSG = (
+    "检测到学科全市排名把「该科均分为空」的学校算进参赛池："
+    "Postgres 下 ORDER BY 均分 DESC 时 NULL 会占掉前列，名次与分母都会偏。"
+    "必须按科先 WHERE 该科均分 IS NOT NULL（或 >0）再 RANK()/COUNT(*) OVER()；"
+    "推荐 ORDER BY 均分 DESC NULLS LAST；"
+    "禁止 PARTITION BY 学科/subject 时带着空均分行一起排。"
+)
+_SUBJECT_MUTUAL_RANK_MSG = (
+    "检测到把「各科全市均分」UNION 后做 RANK()/COUNT(*) OVER()："
+    "这是科目互比，参赛校数会变成科目数（常为 8/9），不是全市学校排名。"
+    "优势/薄弱学科必须先 GROUP BY xx 算各校各科均分，再按科 RANK()/COUNT(*) OVER()，"
+    "外层再 WHERE 目标校；禁止对无学校维度的学科 UNION 行排名。"
+)
+_CROSS_SUBJECT_MIXED_POOL_MSG = (
+    "检测到各校各科均分先 UNION 成「一校一科一行」，再整体 RANK() 且未 PARTITION BY 学科："
+    "参赛池会变成「学科数×学校数」（常为 200+），名次不是该科全市校排。"
+    "必须按科分别 RANK()/COUNT(*) OVER()（每个 UNION 分支内排，或 PARTITION BY 学科），"
+    "外层再 WHERE 目标校。"
+)
+_RUNNING_COUNT_AS_POOL_MSG = (
+    "检测到 COUNT(*) OVER (ORDER BY …) 当作参赛校数："
+    "这是按名次累加的行号/累计数，会让「参赛校数」≈当前名次（如 2/2、7/7），不是全市学校总数。"
+    "参赛校数必须用 COUNT(*) OVER ()（空窗口），与 RANK() OVER (ORDER BY 均分 DESC) 分开写。"
+)
+_COUNT_STAR_OVER_ORDER = re.compile(
+    r"COUNT\s*\(\s*\*\s*\)\s*OVER\s*\(\s*ORDER\s+BY\b",
+    re.IGNORECASE,
+)
+_SUBJECT_NAME_LIT = (
+    r"语文|数学|英语|物理|化学|生物|历史|政治|地理|"
+    r"化学综合|生物综合|政治综合|地理综合"
+)
+_CITYWIDE_SUBJECT_AVG_BRANCH = re.compile(
+    rf"SELECT\s+'(?:{_SUBJECT_NAME_LIT})'\s+AS\s+\w+\s*,\s*"
+    rf".{{0,400}}?\bAVG\s*\("
+    rf".{{0,500}}?\bFROM\s+tb_score_overview\b"
+    rf".{{0,500}}?(?:UNION\s+ALL|\))",
+    re.IGNORECASE | re.DOTALL,
+)
+_PARTITION_BY_SUBJECT = re.compile(
+    r"PARTITION\s+BY\s+[^\)]*\b(?:学科|subject|subject_name)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_WHERE_EXCLUDES_NULL_AVG = re.compile(
+    r"\bIS\s+NOT\s+NULL\b|\bNOT\s+\w+(\.\w+)?\s+IS\s+NULL\b|>\s*0",
+    re.IGNORECASE,
+)
+
+
+def _strip_exists_clauses(where_sql: str) -> str:
+    """去掉 EXISTS(...)，便于判断是否还有直接的校/班谓词。"""
+    s = where_sql or ""
+    prev = None
+    while prev != s:
+        prev = s
+        s = re.sub(
+            r"\bEXISTS\s*\((?:[^()]|\([^()]*\))*\)",
+            " ",
+            s,
+            flags=re.IGNORECASE,
+        )
+    return s
+
+
+def _where_has_direct_scope_pred(where_sql: str) -> bool:
+    return bool(_SCOPE_PRED.search(_strip_exists_clauses(where_sql)))
+
+
+def _where_only_exists_scope(where_sql: str) -> bool:
+    if not where_sql or not re.search(r"\bEXISTS\s*\(", where_sql, re.I):
+        return False
+    if _where_has_direct_scope_pred(where_sql):
+        return False
+    return bool(_SCOPE_COL.search(where_sql))
+
+
+def _select_projection_sql(sel: object) -> str:
+    exprs = getattr(sel, "expressions", None) or []
+    return " ".join(e.sql(dialect="postgres") for e in exprs)
+
+
+def _select_where_sql(sel: object) -> str:
+    wh = sel.args.get("where") if hasattr(sel, "args") else None
+    if wh is None:
+        return ""
+    return wh.sql(dialect="postgres")
+
+
+def _select_has_rank_in_projection(sel: object) -> bool:
+    return bool(_RANK_FN.search(_select_projection_sql(sel)))
+
+
+def _cte_names_with_rank(ast: object) -> set[str]:
+    out: set[str] = set()
+    if _sg_exp is None:
+        return out
+    for cte in ast.find_all(_sg_exp.CTE):  # type: ignore[union-attr]
+        alias = cte.alias_or_name
+        body_sql = cte.this.sql(dialect="postgres") if cte.this is not None else ""
+        if alias and _RANK_FN.search(body_sql):
+            out.add(str(alias).lower())
+    return out
+
+
+def _from_mentions_ranked_cte(sel: object, ranked_ctes: set[str]) -> bool:
+    if not ranked_ctes or _sg_exp is None:
+        return False
+    for table in sel.find_all(_sg_exp.Table):  # type: ignore[union-attr]
+        name = (table.name or "").lower()
+        if name in ranked_ctes:
+            return True
+    return False
+
+
+def _load_sqlglot():
+    """运行时再取 sqlglot，避免模块 import 失败后一直短路。"""
+    global sqlglot, _sg_exp
+    if sqlglot is not None and _sg_exp is not None:
+        return sqlglot, _sg_exp
+    try:
+        import sqlglot as _sg
+        from sqlglot import exp as _exp
+
+        sqlglot = _sg
+        _sg_exp = _exp
+        return sqlglot, _sg_exp
+    except Exception:
+        return None, None
+
+
+def _outermost_select_sql(sql: str) -> str:
+    """取最外层 SELECT 文本（WITH 时取最后一个 ) SELECT 起）。"""
+    s = sql or ""
+    matches = list(re.finditer(r"\)\s*(SELECT)\b", s, re.IGNORECASE))
+    if matches:
+        return s[matches[-1].start(1) :]
+    return s
+
+
+def _outer_select_same_level_rank_and_school_filter(sql: str) -> bool:
+    """最外层同时有 RANK() 与校/班 WHERE → 参赛池已被收成目标校。"""
+    if "tb_score_overview" not in (sql or "").lower():
+        return False
+    outer = _outermost_select_sql(sql)
+    if not _RANK_FN.search(outer):
+        return False
+    outer_no_filter = re.sub(
+        r"FILTER\s*\(\s*WHERE[^)]*\)", " ", outer, flags=re.IGNORECASE
+    )
+    if not re.search(r"\bWHERE\b", outer_no_filter, re.I):
+        return False
+    return _where_has_direct_scope_pred(outer_no_filter)
+
+
+def _rank_pool_shrunk_by_target_filter(sql: str) -> bool:
+    """同层 RANK+校/班 WHERE，或对排名结果仅用 EXISTS 冒充目标校过滤。"""
+    if "tb_score_overview" not in (sql or "").lower():
+        return False
+    if not _RANK_FN.search(sql or ""):
+        return False
+    # 不依赖 sqlglot：外层 SELECT 同时含 RANK 与校/班过滤
+    if _outer_select_same_level_rank_and_school_filter(sql):
+        return True
+    # 不依赖 sqlglot：外层 FROM ranked… 且只用 EXISTS 判断目标校是否存在
+    if _outer_exists_only_school_filter_on_ranked(sql):
+        return True
+    sg, sg_exp = _load_sqlglot()
+    if sg is None or sg_exp is None:
+        return False
+    try:
+        ast = sg.parse_one(sql, read="postgres")
+    except Exception:
+        return False
+    ranked_ctes = _cte_names_with_rank(ast)
+    for sel in ast.find_all(sg_exp.Select):
+        where_sql = _select_where_sql(sel)
+        if _select_has_rank_in_projection(sel) and _where_has_direct_scope_pred(where_sql):
+            return True
+        if not _where_only_exists_scope(where_sql):
+            continue
+        proj = _select_projection_sql(sel)
+        if _RANK_RESULT_COL.search(proj) or _from_mentions_ranked_cte(sel, ranked_ctes):
+            return True
+    return False
+
+
+def _outer_exists_only_school_filter_on_ranked(sql: str) -> bool:
+    """外层从排名 CTE 取数，却只用 EXISTS(目标校) —— 会漏出全市榜。"""
+    outer = _outermost_select_sql(sql)
+    if not re.search(r"\bEXISTS\s*\(", outer, re.I):
+        return False
+    if not (
+        re.search(r"\bFROM\s+(?:ranked|t2|city_rank|school_rank)\b", outer, re.I)
+        or (_RANK_RESULT_COL.search(outer) and re.search(r"\bFROM\s+\w+", outer, re.I))
+    ):
+        return False
+    # 去掉 EXISTS 后不应再有直接的校/班谓词
+    # 先去掉 FILTER(WHERE…) 避免误伤
+    outer_no_filter = re.sub(
+        r"FILTER\s*\(\s*WHERE[^)]*\)", " ", outer, flags=re.IGNORECASE
+    )
+    m = re.search(r"\bWHERE\b([\s\S]+?)(?:\bORDER\s+BY\b|\bLIMIT\b|$)", outer_no_filter, re.I)
+    where_sql = m.group(1) if m else ""
+    if _where_has_direct_scope_pred(where_sql):
+        return False
+    if not _where_only_exists_scope(where_sql):
+        # EXISTS 内用 school_code / xx 等
+        if re.search(r"\bEXISTS\s*\(", where_sql, re.I) and _SCOPE_PRED.search(where_sql):
+            return True
+        return False
+    return True
+
+
+def looks_like_unfiltered_city_leaderboard(
+    sql: str,
+    columns: Sequence[object] | None,
+    rows: Sequence[Sequence[object]] | None,
+) -> bool:
+    """执行后兜底：本意查一校，却返回全市榜（行数远超学科数、名次从 1 排到很多）。"""
+    if "tb_score_overview" not in (sql or "").lower():
+        return False
+    if not _RANK_FN.search(sql or ""):
+        return False
+    # 典型：外层 EXISTS 冒充校过滤
+    if not re.search(r"\bEXISTS\s*\(", sql or "", re.I):
+        return False
+    if not _SCOPE_PRED.search(sql or ""):
+        return False
+    row_list = [list(r) for r in (rows or []) if r is not None]
+    if len(row_list) < 20:
+        return False
+    cols = [str(c or "") for c in (columns or [])]
+    rank_idxs = [i for i, c in enumerate(cols) if _is_rank_result_column(c)]
+    if not rank_idxs:
+        return False
+    rank_vals: list[int] = []
+    for row in row_list:
+        for i in rank_idxs:
+            if i < len(row):
+                v = _cell_as_int(row[i])
+                if v is not None:
+                    rank_vals.append(v)
+    if not rank_vals:
+        return False
+    # 全市榜特征：既有第 1 也有较后名次
+    return min(rank_vals) == 1 and max(rank_vals) >= 5
+
+
+def _cell_as_int(value: object) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(float(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_rank_result_column(name: str) -> bool:
+    c = str(name or "")
+    key = re.sub(r"[\s\-]+", "_", c).lower()
+    if _RANK_RESULT_COL.search(c) or _RANK_RESULT_COL.search(key):
+        return True
+    # yw_rank / rank_yw / rk_yw 等英文别名
+    return bool(re.search(r"(^|_)(rank|rk)(_|$)", key) or re.search(r"(^|_)(rank|rk)_[a-z0-9]+$", key))
+
+
+def _is_city_pool_column(name: str) -> bool:
+    c = str(name or "")
+    key = re.sub(r"[\s\-]+", "_", c).lower()
+    if "参赛" in c or "学校数" in c or "班级数" in c:
+        return True
+    return bool(
+        re.search(
+            r"n_school|n_class|total_schools|total_classes|school_count|总校数|参赛校",
+            key,
+        )
+    )
+
+
+def _is_window_count_column(name: str) -> bool:
+    """同层过滤后 COUNT(*) OVER 常被误标为「参考人数」且恒为 1。"""
+    c = str(name or "")
+    key = re.sub(r"[\s\-]+", "_", c).lower()
+    if "参考人数" in c or "窗口" in c:
+        return True
+    return bool(re.search(r"ref_count|window_n|over_cnt", key))
+
+
+def looks_like_collapsed_city_rank_result(
+    sql: str,
+    columns: Sequence[object] | None,
+    rows: Sequence[Sequence[object]] | None,
+) -> bool:
+    """执行后兜底：同层校过滤导致排名全是第 1。
+
+    覆盖：宽表 1 行多列 rank_yw=1；竖表多行 全市排名=1；
+    SQL 仍是同层 RANK+WHERE 却漏过预检时。
+    """
+    if not _RANK_FN.search(sql or ""):
+        return False
+    if "tb_score_overview" not in (sql or "").lower():
+        return False
+    # 无目标校/班意图时，全市榜单也可能出现多列第 1（不同学校），不在此拦
+    if not _SCOPE_PRED.search(sql or "") and not re.search(r"\bEXISTS\s*\(", sql or "", re.I):
+        return False
+    row_list = [list(r) for r in (rows or []) if r is not None]
+    if not row_list:
+        return False
+    cols = [str(c or "") for c in (columns or [])]
+    if not cols:
+        return False
+    rank_idxs: list[int] = []
+    pool_idxs: list[int] = []
+    win_idxs: list[int] = []
+    for i, c in enumerate(cols):
+        if _is_rank_result_column(c):
+            rank_idxs.append(i)
+        if _is_city_pool_column(c):
+            pool_idxs.append(i)
+        if _is_window_count_column(c):
+            win_idxs.append(i)
+    if not rank_idxs:
+        return False
+
+    all_rank_vals: list[int] = []
+    all_pool_vals: list[int] = []
+    all_win_vals: list[int] = []
+    for row in row_list:
+        for i in rank_idxs:
+            if i < len(row):
+                v = _cell_as_int(row[i])
+                if v is not None:
+                    all_rank_vals.append(v)
+        for i in pool_idxs:
+            if i < len(row):
+                v = _cell_as_int(row[i])
+                if v is not None:
+                    all_pool_vals.append(v)
+        for i in win_idxs:
+            if i < len(row):
+                v = _cell_as_int(row[i])
+                if v is not None:
+                    all_win_vals.append(v)
+
+    if not all_rank_vals or not all(v == 1 for v in all_rank_vals):
+        return False
+
+    # SQL 仍是同层塌缩写法：只要结果排名全是 1 就拦（预检漏网兜底）
+    if _rank_pool_shrunk_by_target_filter(sql):
+        return True
+
+    # 宽表：1 行、≥2 个排名列全是 1
+    if len(row_list) == 1 and len(all_rank_vals) >= 2:
+        return True
+
+    # 参赛池列声称 >1，但窗口行数/参考人数全是 1 → 典型同层过滤
+    if (
+        all_pool_vals
+        and any(v > 1 for v in all_pool_vals)
+        and all_win_vals
+        and all(v == 1 for v in all_win_vals)
+    ):
+        return True
+
+    # 参赛池列=1 且排名全 1
+    if all_pool_vals and any(v == 1 for v in all_pool_vals):
+        return True
+
+    return False
+
+
+def looks_like_subject_mutual_rank_as_city_schools(
+    columns: Sequence[object] | None,
+    rows: Sequence[Sequence[object]] | None,
+) -> bool:
+    """执行后兜底：8~12 行学科表，参赛校数=行数且名次恰为 1..N → 科目互比。"""
+    row_list = [list(r) for r in (rows or []) if r is not None]
+    n = len(row_list)
+    if n < 7 or n > 12:
+        return False
+    cols = [str(c or "") for c in (columns or [])]
+    if not cols:
+        return False
+    pool_idxs = [i for i, c in enumerate(cols) if _is_city_pool_column(c)]
+    rank_idxs = [i for i, c in enumerate(cols) if _is_rank_result_column(c)]
+    if not pool_idxs or not rank_idxs:
+        return False
+    pool_vals: list[int] = []
+    rank_vals: list[int] = []
+    for row in row_list:
+        for i in pool_idxs:
+            if i < len(row):
+                v = _cell_as_int(row[i])
+                if v is not None:
+                    pool_vals.append(v)
+        for i in rank_idxs:
+            if i < len(row):
+                v = _cell_as_int(row[i])
+                if v is not None:
+                    rank_vals.append(v)
+    if not pool_vals or not rank_vals:
+        return False
+    # 参赛「校数」恒等于学科行数
+    if not all(v == n for v in pool_vals):
+        return False
+    # 名次恰好覆盖 1..N（科目互排的典型形态）
+    if sorted(rank_vals) != list(range(1, n + 1)):
+        return False
+    return True
+
+
+def _subject_rank_keeps_null_avgs(sql: str) -> bool:
+    """PARTITION BY 学科 的全市排名未剔空均分 → NULL 占前列、分母偏大。"""
+    if "tb_score_overview" not in (sql or "").lower():
+        return False
+    if not _RANK_FN.search(sql or ""):
+        return False
+    sg, sg_exp = _load_sqlglot()
+    if sg is not None and sg_exp is not None:
+        try:
+            ast = sg.parse_one(sql, read="postgres")
+        except Exception:
+            ast = None
+        if ast is not None:
+            for sel in ast.find_all(sg_exp.Select):
+                proj = _select_projection_sql(sel)
+                if not _RANK_FN.search(proj):
+                    continue
+                if not _PARTITION_BY_SUBJECT.search(proj):
+                    continue
+                where_sql = _select_where_sql(sel)
+                if _WHERE_EXCLUDES_NULL_AVG.search(where_sql):
+                    continue
+                return True
+    # 解析失败时的窄规则：PARTITION BY 学科 + ORDER BY DESC 且无 NULLS LAST
+    for m in re.finditer(
+        r"\b(?:RANK|DENSE_RANK)\s*\(\s*\)\s*OVER\s*\(([^)]*)\)",
+        sql or "",
+        re.IGNORECASE | re.DOTALL,
+    ):
+        body = m.group(1) or ""
+        if not _PARTITION_BY_SUBJECT.search(body):
+            continue
+        if re.search(r"ORDER\s+BY\s+.+\bDESC\b", body, re.I) and not re.search(
+            r"NULLS\s+LAST", body, re.I
+        ):
+            return True
+    return False
+
+
+def _citywide_subject_avg_union_then_rank(sql: str) -> bool:
+    """各科全市均分 UNION（无 GROUP BY xx）后再 RANK → 科目互比冒充校排。"""
+    s = sql or ""
+    if "tb_score_overview" not in s.lower():
+        return False
+    if not _RANK_FN.search(s):
+        return False
+    for m in _CITYWIDE_SUBJECT_AVG_BRANCH.finditer(s):
+        chunk = m.group(0) or ""
+        if re.search(r"\bGROUP\s+BY\b", chunk, re.I) and re.search(
+            r"\bGROUP\s+BY\b[\s\S]{0,80}\bxx\b", chunk, re.I
+        ):
+            continue
+        return True
+    return False
+
+
+_SUBJECT_LIT = re.compile(
+    r"'(?:语文|数学|英语|物理|化学|生物|政治|历史|地理)'",
+)
+
+
+def _rank_on_unpivoted_subjects_without_partition(sql: str) -> bool:
+    """一校一科 UNION 后整体 RANK 且无 PARTITION BY 学科 → 分母≈学科数×校数。"""
+    s = sql or ""
+    if "tb_score_overview" not in s.lower():
+        return False
+    if not re.search(r"\bUNION\s+ALL\b", s, re.I):
+        return False
+    unpivot_ctes: list[str] = []
+    for m in re.finditer(
+        r"\b(\w+)\s+AS\s*\(\s*(SELECT\b[\s\S]*?)\)\s*(?:,|(?:SELECT)\b)",
+        s,
+        re.IGNORECASE,
+    ):
+        name, body = m.group(1), m.group(2) or ""
+        if not re.search(r"\bUNION\s+ALL\b", body, re.I):
+            continue
+        if len(_SUBJECT_LIT.findall(body)) < 2:
+            continue
+        if not re.search(r"\bxx\b", body, re.I):
+            continue
+        # 各分支内已 RANK 的正确写法：跳过
+        if _RANK_FN.search(body):
+            continue
+        unpivot_ctes.append(name.lower())
+    if not unpivot_ctes:
+        return False
+    for m in re.finditer(
+        r"\b(?:RANK|DENSE_RANK)\s*\(\s*\)\s*OVER\s*\(([^)]*)\)",
+        s,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        win = m.group(1) or ""
+        if _PARTITION_BY_SUBJECT.search(win):
+            continue
+        if not re.search(r"ORDER\s+BY", win, re.I):
+            continue
+        tail = s[m.end() : m.end() + 500]
+        for cte in unpivot_ctes:
+            if re.search(rf"\bFROM\s+{re.escape(cte)}\b", tail, re.I):
+                return True
+    return False
+
+
+def looks_like_running_count_as_school_pool(
+    columns: Sequence[object] | None,
+    rows: Sequence[Sequence[object]] | None,
+) -> bool:
+    """执行后兜底：多数行「参赛校数≈全市排名」且池很小 → 累计 COUNT 冒充分母。"""
+    row_list = [list(r) for r in (rows or []) if r is not None]
+    if len(row_list) < 4:
+        return False
+    cols = [str(c or "") for c in (columns or [])]
+    pool_idxs = [i for i, c in enumerate(cols) if _is_city_pool_column(c)]
+    rank_idxs = [i for i, c in enumerate(cols) if _is_rank_result_column(c)]
+    if not pool_idxs or not rank_idxs:
+        return False
+    eq = 0
+    pairs = 0
+    for row in row_list:
+        rk = None
+        pl = None
+        for i in rank_idxs:
+            if i < len(row):
+                rk = _cell_as_int(row[i])
+                if rk is not None:
+                    break
+        for i in pool_idxs:
+            if i < len(row):
+                pl = _cell_as_int(row[i])
+                if pl is not None:
+                    break
+        if rk is None or pl is None:
+            continue
+        pairs += 1
+        if pl == rk and pl <= 15:
+            eq += 1
+    return pairs >= 4 and eq >= max(3, (pairs * 2) // 3)
+
+
+def looks_like_cross_subject_mixed_pool(
+    columns: Sequence[object] | None,
+    rows: Sequence[Sequence[object]] | None,
+) -> bool:
+    """执行后兜底：6~12 科行且参赛池≥80（≈学科×校）→ 跨科混池排名。"""
+    row_list = [list(r) for r in (rows or []) if r is not None]
+    n = len(row_list)
+    if n < 6 or n > 12:
+        return False
+    cols = [str(c or "") for c in (columns or [])]
+    if not cols:
+        return False
+    has_subject = any(re.search(r"学科|subject", c, re.I) for c in cols)
+    if not has_subject:
+        return False
+    pool_idxs = [i for i, c in enumerate(cols) if _is_city_pool_column(c)]
+    if not pool_idxs:
+        return False
+    pool_vals: list[int] = []
+    for row in row_list:
+        for i in pool_idxs:
+            if i < len(row):
+                v = _cell_as_int(row[i])
+                if v is not None:
+                    pool_vals.append(v)
+    if not pool_vals:
+        return False
+    if len(set(pool_vals)) != 1:
+        return False
+    p = pool_vals[0]
+    return p >= max(80, n * 15)
 
 
 def _unbound_literals(sql: str, bound: Sequence[str] | None) -> list[str]:
@@ -116,6 +726,16 @@ def lint_edu_sql_blocks(
             "必须 GROUP BY xx,bj 后 RANK() OVER (ORDER BY 均分 DESC)，禁止 PARTITION BY bj；"
             "目标校/班只允许在排名完成后再 WHERE 过滤。"
         )
+    if _rank_pool_shrunk_by_target_filter(s):
+        blocks.append(_RANK_POOL_SHRINK_MSG)
+    if _subject_rank_keeps_null_avgs(s):
+        blocks.append(_SUBJECT_RANK_NULL_POOL_MSG)
+    if _citywide_subject_avg_union_then_rank(s):
+        blocks.append(_SUBJECT_MUTUAL_RANK_MSG)
+    if _rank_on_unpivoted_subjects_without_partition(s):
+        blocks.append(_CROSS_SUBJECT_MIXED_POOL_MSG)
+    if _RANK_FN.search(s) and _COUNT_STAR_OVER_ORDER.search(s):
+        blocks.append(_RUNNING_COUNT_AS_POOL_MSG)
     if _count_distinct_class_name_as_city_n(s):
         blocks.append(
             "检测到 COUNT(DISTINCT bj)：班名（高三(1)班…）全市重复，这是班名种类不是全市班级数。"
@@ -408,4 +1028,9 @@ __all__ = [
     "format_lint_warnings",
     "lint_edu_sql",
     "lint_edu_sql_blocks",
+    "looks_like_collapsed_city_rank_result",
+    "looks_like_cross_subject_mixed_pool",
+    "looks_like_running_count_as_school_pool",
+    "looks_like_subject_mutual_rank_as_city_schools",
+    "looks_like_unfiltered_city_leaderboard",
 ]

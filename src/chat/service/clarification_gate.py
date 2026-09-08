@@ -122,6 +122,21 @@ def _recent_history(conversation_id: int | None) -> list[dict[str, str]]:
         return []
 
 
+def _canonicalize_filled_slots(filled: dict[str, str]) -> dict[str, str]:
+    """合并后兜底：剥口语「学校」尾巴，避免拉选项时 LIKE 命中 0 行。"""
+    from src.agent.education.query_parse import peel_rhetorical_school_suffix
+
+    out = dict(filled or {})
+    school = str(out.get(SLOT_SCHOOL) or "").strip()
+    if school:
+        peeled = peel_rhetorical_school_suffix(school)
+        if peeled:
+            out[SLOT_SCHOOL] = peeled
+        else:
+            out.pop(SLOT_SCHOOL, None)
+    return out
+
+
 async def _load_options_for_slot(
     slot: str,
     *,
@@ -133,6 +148,7 @@ async def _load_options_for_slot(
     defaults = default_options_for_slot(slot)
     if defaults:
         return defaults
+    filled = _canonicalize_filled_slots(filled)
     try:
         from datasource.service.edu_permission import EduScope, edu_scope_dict_for_user_id
         from src.agent.education.api import _build_orchestrator, _load_meta_options
@@ -163,6 +179,23 @@ async def _load_options_for_slot(
                 out.append(s)
             if len(out) >= 12:
                 break
+        # 校名过滤仍空时放开学校条件再拉一次（权限 SQL 仍会收敛）
+        if not out and slot == "exam_name" and filled.get(SLOT_SCHOOL):
+            options = await _load_meta_options(
+                orch,
+                school_name=None,
+                exam_name=filled.get("exam_name") or None,
+                class_name=filled.get(SLOT_CLASS) or None,
+                subject=filled.get("subject_name") or None,
+                edu_scope=EduScope.from_dict(edu),
+            )
+            raw = options.get(key) or []
+            for item in raw:
+                s = str(item or "").strip()
+                if s and s not in out:
+                    out.append(s)
+                if len(out) >= 12:
+                    break
         return out
     except Exception as exc:  # noqa: BLE001
         logger.warning("load clarify options failed: %s", exc)
@@ -335,7 +368,9 @@ async def maybe_clarify_turn(
     current_filled = extract_filled_slots(request.question, edu)
     current_filled.update(sanitize_llm_slots(intent.slots))
     turn_ctx = load_turn_context(request.conversation_id, current_user_id, edu)
-    filled = merge_inherited_slots(current_filled, turn_ctx.inherited, request.question)
+    filled = _canonicalize_filled_slots(
+        merge_inherited_slots(current_filled, turn_ctx.inherited, request.question)
+    )
     extra = extra_inherited_slots(current_filled, filled)
     # user_input 是 LLM 补全后的完整指令；「补充：标签=值」标记必须保留——
     # 下游 sub_task 与工具会对 user_question 做正则抽取，纯改写会打断这条链路。

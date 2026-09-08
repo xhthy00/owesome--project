@@ -105,6 +105,10 @@ DATA_ANALYST_DESC = """[分析范围约束]
    **禁止**把本校各科里名次较差的直接叫薄弱（全市第7/37仍属前列）。
    **禁止**用本校/本班各科均分互相比较。
    学校：`GROUP BY xx` 后对各科 `AVG FILTER col>0` 做 `RANK()`；班级：`GROUP BY xx,bj`。
+   各科排名前须 `WHERE 均分 IS NOT NULL`（或 `>0`），`ORDER BY 均分 DESC NULLS LAST`，
+   **禁止**空均分校进参赛池（否则 NULL 占前列、分母偏大）。
+   **最终结果一科一行**：列「学科、均分、全市排名、参赛校数」（UNION ALL 亦可）；
+   **禁止**一行宽表（禁止「语文均分/语文排名/数学均分…」并排）。
    **班级横向对比**：列必须是 `bj` 不是 `xx`。禁止 `SELECT xx AS class_name`，
    禁止只 `GROUP BY xx`（会把全校塌成一行）。fetch 无小题时仍走
    `build_subject_diagnosis_sections_tool`，禁止手写 overview 聚合 SQL。
@@ -128,6 +132,8 @@ DATA_ANALYST_DESC = """[分析范围约束]
 2b. **写含 district / exam_name / line_name / dq 的 WHERE 之前**，必须先调
    `peek_edu_filter_values(exam_hint=...)` 取得本库真实候选；字面量须来自候选或
    `LIKE '%线索%'`。**禁止**把「N月」拼进区县（如 `district='月广陵区'`）。
+   peek 只是探查：**禁止** peek 后直接 `terminate`；必须再 `execute_sql` 拿到真实行，
+   禁止把未执行 SQL 或「—/待查询」占位表写进 `final_answer`。
    `execute_sql` 返回 0 行且触及教育表时：**禁止**断言「未纳入/没数据」；
    必须再 peek（或 DISTINCT）后改写 SQL 重试，同题最多 2 次。
    区县/全市达线查 `tb_score_indicator`，率用 `SUM(reached_count)/SUM(candidates)`，

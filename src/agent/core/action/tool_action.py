@@ -61,7 +61,36 @@ _NEXT_TOOL_HINTS: dict[str, str] = {
     ),
     "list_tables": "`describe_table` / `execute_sql`",
     "describe_table": "`execute_sql` / `sample_rows`",
+    "peek_edu_filter_values": "`execute_sql` 写最终查询（peek 不够作答）",
 }
+
+_SQL_FACT_TASK_MARKERS = (
+    "用 SQL 直接回答",
+    "自由 SQL",
+    "本题是优势/薄弱学科",
+)
+
+_TERMINATE_WITHOUT_SQL_MSG = (
+    "本子任务必须先成功调用 execute_sql 拿到真实结果，再 terminate。"
+    "当前尚未执行 SQL；禁止用「—/待查询」占位表，禁止把未执行的 SQL 写进 final_answer。"
+    "请立即 execute_sql（先全市 GROUP BY xx 做 RANK，外层再 WHERE xx LIKE 目标校）。"
+)
+
+
+def _sql_fact_task_requires_execute(sub_task: str) -> bool:
+    t = sub_task or ""
+    if any(m in t for m in _SQL_FACT_TASK_MARKERS):
+        return True
+    return False
+
+
+def _cache_has_successful_execute_sql(cache: dict[str, ActionOutput] | None) -> bool:
+    if not isinstance(cache, dict):
+        return False
+    for out in cache.values():
+        if getattr(out, "action", None) == "execute_sql" and getattr(out, "is_exe_success", False):
+            return True
+    return False
 
 #: 这些工具禁止 LLM 手填超长表格入参（易截断 JSON）；改由 bindings / 上游 SQL 注入。
 _STRIP_TABLE_ARGS_TOOLS = frozenset(
@@ -579,6 +608,23 @@ class ToolAction(Action):
             )
 
         tool_name_str = str(tool_name)
+        # SQL 事实子任务：禁止 peek 后直接 terminate（会产出「待查询/0行」空表）
+        if tool_name_str == TERMINATE_TOOL_NAME:
+            cache_pre = kwargs.get("tool_call_cache")
+            if _sql_fact_task_requires_execute(sub_task) and not _cache_has_successful_execute_sql(
+                cache_pre if isinstance(cache_pre, dict) else None
+            ):
+                msg = _TERMINATE_WITHOUT_SQL_MSG
+                _audit(tool_name=tool_name_str, success=False, args=args, result_preview=msg)
+                return ActionOutput(
+                    is_exe_success=False,
+                    content=msg,
+                    action=tool_name_str,
+                    thoughts=thoughts,
+                    observations=msg,
+                    terminate=False,
+                )
+
         # 综合/学生报告：丢掉手填 records（易截断），只保留 class_name 等轻量参数
         if tool_name_str in _STRIP_TABLE_ARGS_TOOLS:
             args = _sanitize_report_tool_args(

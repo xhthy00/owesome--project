@@ -112,9 +112,11 @@ def build_education_sql_hint_text(question: str) -> str:
             "优势/薄弱学科：按该校（有班则该班）各科均分的全市排名相对位置判断，"
             "名次/参赛数≤25%为前列（优势），≥50%为靠后（薄弱），中间为中游；"
             "禁止把本校各科里名次较差的直接叫薄弱；禁止用本校各科均分互比；"
-            "GROUP BY xx（班级再加 bj）后 RANK() OVER (ORDER BY 均分 DESC) 与 COUNT(*) OVER()，"
-            "禁止 PARTITION BY bj，禁止 COUNT(DISTINCT bj)，"
-            "xsxz='在籍生'，AVG FILTER col>0；化学/生物/政治/地理用 hxzh/swzh/zzzh/dlzh。"
+            "GROUP BY xx（班级再加 bj）后 RANK() OVER (ORDER BY 均分 DESC NULLS LAST) "
+            "与 COUNT(*) OVER()，各科须先 WHERE 均分 IS NOT NULL（或 >0）；"
+            "禁止 PARTITION BY bj，禁止 COUNT(DISTINCT bj)，禁止空均分校进参赛池，"
+            "xsxz='在籍生'，AVG FILTER col>0；化学/生物/政治/地理用 hxzh/swzh/zzzh/dlzh；"
+            "最终结果一科一行（学科/均分/全市排名/参赛数），禁止语文均分+语文排名并排宽表。"
         )
     if is_school_class_comparison_query(q):
         rules.append(

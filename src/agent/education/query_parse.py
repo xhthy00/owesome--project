@@ -26,6 +26,11 @@ _SCHOOL_ASK_FILLERS = (
     "请帮我看下",
     "请帮我看",
     "请帮我",
+    "请告诉我一下",
+    "请告诉我",
+    "请告诉",
+    "告诉我一下",
+    "告诉我",
     "帮我分析",
     "帮我看看",
     "帮我看一下",
@@ -826,6 +831,9 @@ def is_school_vs_city_avg_query(question: str) -> bool:
     q = (question or "").strip()
     if not q:
         return False
+    # 优势/薄弱学科也常带「全市+均分」，但是各科排名相对位置，不是校均 vs 市均两行对比
+    if is_subject_strength_query(q):
+        return False
     if not extract_school_target(q) and "本校" not in q and "我校" not in q:
         return False
     if not any(h in q for h in ("均分", "平均分")):
@@ -1532,13 +1540,46 @@ def _normalize_school_extract_blob(blob: str) -> str:
     return _CODED_SCHOOL_PREFIX_RE.sub(r" \1", out)
 
 
+def _strip_school_ask_fillers(name: str) -> str:
+    """反复剥掉校名前的请求语（「请告诉我扬大附中」→「扬大附中」）。"""
+    out = name or ""
+    fillers = sorted(_SCHOOL_ASK_FILLERS, key=len, reverse=True)
+    changed = True
+    while changed and out:
+        changed = False
+        for prefix in fillers:
+            if out.startswith(prefix):
+                out = out[len(prefix) :]
+                changed = True
+                break
+    return out
+
+
 def _school_name_stem(name: str) -> str:
     return re.sub(_SCHOOL_SUFFIX + r"$", "", name)
 
 
+# 完整校名后缀后再挂的口语「学校」（「扬大附中学校最优势学科」），不是真校名一部分。
+_COMPLETE_SCHOOL_TAIL_RE = re.compile(r"(?:中学|学院|大学|附中|分校)$")
+
+
+def peel_rhetorical_school_suffix(name: str) -> str:
+    """剥掉「已是完整校名 + 口语学校」的尾巴。
+
+    「扬大附中学校」→「扬大附中」；「实验学校」「某某学校」保持不变。
+    """
+    n = re.sub(r"\s+", "", str(name or ""))
+    if not n.endswith("学校"):
+        return n
+    stem = n[:-2]
+    if stem and _COMPLETE_SCHOOL_TAIL_RE.search(stem):
+        return stem
+    return n
+
+
 def _is_request_speech_school_name(name: str) -> bool:
     """「请分析一下学校」挖空请求语后只剩校名后缀，不是真校名。"""
-    stem = _school_name_stem(name)
+    stem = _school_name_stem(_strip_school_ask_fillers(name))
     if stem.startswith("请"):
         stem = stem[1:]
     fillers = sorted(_SCHOOL_ASK_FILLERS, key=len, reverse=True)
@@ -1567,13 +1608,11 @@ def extract_school_targets(question: str) -> list[str]:
         for pat in _SCHOOL_PATTERNS:
             for m in pat.finditer(blob):
                 name = re.sub(r"\s+", "", m.group(1))
-                for prefix in _SCHOOL_ASK_FILLERS:
-                    if name.startswith(prefix):
-                        name = name[len(prefix):]
-                        break
+                name = _strip_school_ask_fillers(name)
                 # 「3月扬州中学」勿把月份的「月」拼进校名
                 if name.startswith("月") and re.search(rf"\d月{re.escape(name[1:])}", q):
                     name = name[1:]
+                name = peel_rhetorical_school_suffix(name)
                 if (
                     not name
                     or not _school_name_stem(name)
@@ -2614,6 +2653,7 @@ __all__ = [
     "extract_district_target",
     "extract_exam_name_hint",
     "extract_school_target",
+    "peel_rhetorical_school_suffix",
     "extract_school_type_target",
     "extract_student_id_target",
     "extract_student_target",

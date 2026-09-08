@@ -476,14 +476,28 @@ def _subject_strength_fact_hint(class_name: str) -> str:
             "做 RANK() OVER (ORDER BY 均分 DESC) 与 COUNT(*) OVER()；"
             "禁止 PARTITION BY bj（那是同名班跨校互比）；禁止 COUNT(DISTINCT bj)（班名重复，不是全市班级数）；"
             "化学/生物/政治/地理用 hxzh/swzh/zzzh/dlzh，禁止 hx/sw/zz/dl。"
-            "目标校+班只在排名完成后再 WHERE 过滤。禁止用该班各科均分互相比较，禁止班际报告工具。"
+            "目标校+班只在排名完成后再 WHERE 过滤。"
+            "**最终结果必须一科一行**：列=学科、均分、全市排名、参赛班数（可用 UNION ALL）；"
+            "**禁止**一行宽表（禁止 语文均分/语文排名… 并排多列）。"
+            "禁止用该班各科均分互相比较，禁止班际报告工具。"
         )
     return (
         "本题是优势/薄弱学科：按该校各科均分的**全市学校排名相对位置**判断"
         "（名次/参赛数≤25%=前列/优势，≥50%=靠后/薄弱，中间=中游；"
         "禁止把本校各科里名次较差的直接叫薄弱，例如第7/37仍属前列）。"
         "查 tb_score_overview，xsxz='在籍生'，GROUP BY xx 后对各科 AVG FILTER col>0 做 RANK()；"
-        "外层再滤目标校。禁止用该校各科均分互相比较，禁止班际报告工具。"
+        "各科须先 WHERE 该科均分 IS NOT NULL（或 >0）再 RANK()/COUNT(*) OVER()，"
+        "ORDER BY 均分 DESC NULLS LAST；禁止空均分校进参赛池。"
+        "外层再滤目标校。"
+        "**禁止**先算全市各科均分（无 GROUP BY xx）再 RANK——那是科目互比，"
+        "参赛校数会变成 8/9（科目数），均分也会变成全市均分而非该校均分。"
+        "排名 CTE 必须保留 xx/school_code；外层用 WHERE xx LIKE 滤目标校；"
+        "**禁止**只用 EXISTS(目标校) 却不滤排名行（会漏出全市榜，摘要易误当成该校全第1）。"
+        "**最终结果必须一科一行**：列=学科、均分、全市排名、参赛校数（可用 UNION ALL）；"
+        "**禁止**一行宽表（禁止 语文均分/语文排名/数学均分… 并排多列）。"
+        "若先 UNION 成「一校一科一行」，必须在每个分支内 RANK，或 RANK() OVER (PARTITION BY 学科 ...)；"
+        "**禁止**对多科混合行做无 PARTITION 的整体 RANK（参赛校数会变成 200+）。"
+        "禁止用该校各科均分互相比较，禁止班际报告工具。"
     )
 
 
@@ -730,6 +744,7 @@ def build_fact_query_plan_items(question: str) -> list[dict[str, str]]:
         not line_reach_hint
         and not score_band_hint
         and not school_type_avg_hint
+        and not strength_hint
         and is_school_vs_city_avg_query(q)
     ):
         school_city_hint = _school_vs_city_avg_hint()

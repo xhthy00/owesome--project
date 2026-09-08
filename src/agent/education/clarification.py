@@ -475,6 +475,7 @@ def sanitize_llm_slots(slots: Mapping[str, Any] | None) -> dict[str, str]:
         extract_class_target,
         has_class_alias,
         is_vague_exam_name,
+        peel_rhetorical_school_suffix,
     )
 
     out: dict[str, str] = {}
@@ -491,6 +492,15 @@ def sanitize_llm_slots(slots: Mapping[str, Any] | None) -> dict[str, str]:
         if slot == SLOT_SCOPE and value not in _SCOPE_OPTIONS:
             value = _scope_from_text(value)
             if not value:
+                continue
+        if slot == SLOT_SCHOOL:
+            from src.agent.education.query_parse import (
+                _is_request_speech_school_name,
+                _strip_school_ask_fillers,
+            )
+
+            value = _strip_school_ask_fillers(peel_rhetorical_school_suffix(value))
+            if not value or _is_request_speech_school_name(value):
                 continue
         out[slot] = value
     return out
