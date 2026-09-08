@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Mapping
 
 from src.agent.education.report_types import ReportType
@@ -109,6 +110,38 @@ REQUIRED_SLOTS_BY_REPORT: dict[ReportType, tuple[str, ...]] = {
     ReportType.SCORE_BAND: (SLOT_EXAM,),
     ReportType.SUBJECT_RESEARCH: (SLOT_EXAM, SLOT_SUBJECT, SLOT_SCHOOL),
     ReportType.DIFFICULTY_CURVE: (SLOT_EXAM, SLOT_SUBJECT),
+}
+
+
+class FactQueryKind(str, Enum):
+    """事实问口径——不出报告时的「意图」，用来查必填槽。
+
+    报告有 ``REQUIRED_SLOTS_BY_REPORT``，事实问以前只有一堆分散的启发式分支，
+    缺哪个槽全看正则命中顺序。这个枚举把事实问也拉回「意图 → 必填槽」查表。
+    """
+
+    ITEM_DIAGNOSIS = "item_diagnosis"          # 小题/知识点失分
+    SUBJECT_RESEARCH = "subject_research"      # 一校一场学科教研
+    CLASS_WEAK_SUBJECT = "class_weak_subject"  # 指定班级薄弱学科
+    SUBJECT_STRENGTH = "subject_strength"      # 优势/薄弱学科（各科均分排名）
+    LINE_REACH = "line_reach"                  # 达线/预测线人数或率
+    SCORE_STAT = "score_stat"                  # 单场均分/最高分/口语分数问
+    VAGUE_OVERALL = "vague_overall"            # 模糊整体（帮我看看/学情如何）
+    UNSPECIFIED_EXAM = "unspecified_exam"      # 用「本次/这场」指代但没给专名
+
+
+#: 事实问口径 → 必填槽。「必填」指口径本身按这个维度出数，不给就得猜。
+#: 用户已给宽范围（全市/各校）或权限已唯一绑定时，由 ``candidate_missing_slots``
+#: 的豁免层减掉，不在本表里开口子。
+REQUIRED_SLOTS_BY_FACT: dict[FactQueryKind, tuple[str, ...]] = {
+    FactQueryKind.ITEM_DIAGNOSIS: (SLOT_EXAM, SLOT_SUBJECT, SLOT_CLASS, SLOT_SCHOOL),
+    FactQueryKind.SUBJECT_RESEARCH: (SLOT_EXAM, SLOT_SUBJECT, SLOT_SCHOOL),
+    FactQueryKind.CLASS_WEAK_SUBJECT: (SLOT_EXAM, SLOT_CLASS, SLOT_SCHOOL),
+    FactQueryKind.SUBJECT_STRENGTH: (SLOT_EXAM, SLOT_CLASS, SLOT_SCHOOL),
+    FactQueryKind.LINE_REACH: (SLOT_EXAM, SLOT_CLASS, SLOT_SCHOOL),
+    FactQueryKind.SCORE_STAT: (SLOT_EXAM, SLOT_CLASS, SLOT_SCHOOL),
+    FactQueryKind.VAGUE_OVERALL: (SLOT_EXAM, SLOT_CLASS, SLOT_SCHOOL),
+    FactQueryKind.UNSPECIFIED_EXAM: (SLOT_EXAM,),
 }
 _PROMPT_BY_SLOT = {
     SLOT_SCOPE: "请确认分析范围：全市、全校，还是某个班级？",
@@ -237,27 +270,60 @@ def _exam_missing(question: str, filled: Mapping[str, str]) -> bool:
     return False
 
 
-def _exam_needed(question: str, route: Any) -> bool:
-    """报告、达线、单场分数统计等按场次出数的问句，未点考试就不能默选一场。"""
+_ITEM_LOSS_MARKERS = ("小题", "逐题", "知识点")
+_ITEM_LOSS_HINTS = ("失分", "扣分", "得分率", "正确率", "错得", "掌握", "薄弱")
+
+
+def is_item_loss_query(question: str) -> bool:
+    """小题/知识点失分事实问：得分率只在「一场×一科×一个范围」内才有意义。"""
     from src.agent.education.query_parse import (
+        is_individual_student_analysis_query,
+        is_item_difficulty_curve_query,
+        is_knowledge_cohort_gap_query,
+    )
+
+    q = (question or "").strip()
+    if not q or not any(m in q for m in _ITEM_LOSS_MARKERS):
+        return False
+    if not any(h in q for h in _ITEM_LOSS_HINTS):
+        return False
+    if is_item_difficulty_curve_query(q) or is_knowledge_cohort_gap_query(q):
+        return False
+    return not is_individual_student_analysis_query(q)
+
+
+def fact_query_kind(question: str) -> FactQueryKind | None:
+    """事实问归到哪个口径。按特异性从高到低取第一个命中的。"""
+    from src.agent.education.query_parse import (
+        is_class_weak_subject_query,
         is_line_reach_query,
         is_oral_score_inquiry,
         is_score_stat_query,
+        is_subject_research_report_query,
         is_subject_strength_query,
         refers_to_unspecified_exam,
     )
 
-    if _needs_report(route) or _route_type(route) is not None:
-        return True
-    if is_vague_overall_query(question):
-        return True
-    return (
-        is_line_reach_query(question)
-        or is_score_stat_query(question)
-        or is_oral_score_inquiry(question)
-        or is_subject_strength_query(question)
-        or refers_to_unspecified_exam(question)
-    )
+    q = (question or "").strip()
+    if not q:
+        return None
+    if is_item_loss_query(q):
+        return FactQueryKind.ITEM_DIAGNOSIS
+    if is_subject_research_report_query(q):
+        return FactQueryKind.SUBJECT_RESEARCH
+    if is_class_weak_subject_query(q):
+        return FactQueryKind.CLASS_WEAK_SUBJECT
+    if is_subject_strength_query(q):
+        return FactQueryKind.SUBJECT_STRENGTH
+    if is_line_reach_query(q):
+        return FactQueryKind.LINE_REACH
+    if is_score_stat_query(q) or is_oral_score_inquiry(q):
+        return FactQueryKind.SCORE_STAT
+    if is_vague_overall_query(q):
+        return FactQueryKind.VAGUE_OVERALL
+    if refers_to_unspecified_exam(q):
+        return FactQueryKind.UNSPECIFIED_EXAM
+    return None
 
 
 def _first_hard_slot(candidates: list[str]) -> str | None:
@@ -454,20 +520,15 @@ def candidate_missing_slots(
 ) -> list[str]:
     """若不问就可能猜错的槽，按优先级去重。
 
-    优先走报告类型必填矩阵，再叠加模糊整体 / 事实问启发式。
+    报告走 ``REQUIRED_SLOTS_BY_REPORT``，事实问走 ``REQUIRED_SLOTS_BY_FACT``，
+    两条路径同构：查表得必填槽，再由豁免层（宽范围 / 点名学校 / 权限唯一绑定）减掉。
     """
     from src.agent.education.query_parse import (
         extract_school_target,
         has_class_alias,
         is_bureau_report_query,
         is_citywide_analysis_query,
-        is_class_weak_subject_query,
-        is_line_reach_query,
-        is_oral_score_inquiry,
         is_school_class_comparison_query,
-        is_score_stat_query,
-        is_subject_research_report_query,
-        is_subject_strength_query,
     )
 
     q = question or ""
@@ -521,10 +582,10 @@ def candidate_missing_slots(
         or _has_wide_scope(q)
     )
 
-    # 3) 无路由时的事实启发式
+    # 3) 事实问必填槽矩阵
     if rt is None:
-        exam_needed = _exam_needed(q, route)
-        if exam_needed and _exam_missing(q, filled_map):
+        # 要报告但类型未定：场次仍不能默选一场
+        if needs and _exam_missing(q, filled_map):
             add(SLOT_EXAM)
 
         bound_classes = _unique_bound_classes(edu)
@@ -535,46 +596,24 @@ def candidate_missing_slots(
         # 只看问句：教师/校管的 school_name 可能来自绑定权限而非用户表达，不能当作
         # 用户主动限定了范围。问句带口语班级线索（我们班/三班）时仍需澄清。
         school_scoped = bool(extract_school_target(q)) and not has_class_alias(q)
-        fact_needs_class = (
-            not skip_class
-            and not school_scoped
-            and not filled_map.get(SLOT_CLASS)
-            and (
-                is_score_stat_query(q)
-                or is_oral_score_inquiry(q)
-                or is_line_reach_query(q)
-                or is_subject_strength_query(q)
-                or has_class_alias(q)
-                or is_vague_overall_query(q)
-            )
-            and (
-                has_class_alias(q)
-                or (role == "teacher" and len(bound_classes) != 1)
-                or role in ("bureau_admin", "platform_admin", "")
-                or role == "school_admin"
-            )
-        )
-        class_needed = (
-            is_class_weak_subject_query(q)
-            or fact_needs_class
-        )
-        if class_needed and not skip_class and not filled_map.get(SLOT_CLASS):
-            # 老师只绑 1 班：静默继承，不追问
-            if not (role == "teacher" and len(bound_classes) == 1):
-                add(SLOT_CLASS)
-
-        if class_needed and not skip_class and not filled_map.get(SLOT_SCHOOL):
-            bound = _bound_school(edu)
-            if not bound or role not in ("teacher", "school_admin", "student"):
-                add(SLOT_SCHOOL)
-
-        research = is_subject_research_report_query(q)
-        if research and not filled_map.get(SLOT_SCHOOL):
-            bound = _bound_school(edu)
-            if not bound or role not in ("teacher", "school_admin"):
-                add(SLOT_SCHOOL)
-        if research and not filled_map.get(SLOT_SUBJECT):
-            add(SLOT_SUBJECT)
+        for slot in REQUIRED_SLOTS_BY_FACT.get(fact_query_kind(q), ()):
+            if slot == SLOT_EXAM:
+                if _exam_missing(q, filled_map):
+                    add(SLOT_EXAM)
+            elif slot == SLOT_CLASS:
+                # 老师只绑 1 班：静默继承，不追问；学生只看自己
+                if skip_class or school_scoped or role == "student":
+                    continue
+                if not (role == "teacher" and len(bound_classes) == 1):
+                    add(SLOT_CLASS)
+            elif slot == SLOT_SCHOOL:
+                if skip_class:
+                    continue
+                bound = _bound_school(edu)
+                if not bound or role not in ("teacher", "school_admin", "student"):
+                    add(SLOT_SCHOOL)
+            else:
+                add(slot)
 
     # 4) 有路由时的班级补充（矩阵未覆盖的别名场景）
     if rt is not None and not skip_class and not filled_map.get(SLOT_CLASS):
@@ -789,6 +828,8 @@ def parse_pending_clarify(exec_result: Any) -> dict[str, Any] | None:
 
 __all__ = [
     "ClarificationNeed",
+    "FactQueryKind",
+    "REQUIRED_SLOTS_BY_FACT",
     "REQUIRED_SLOTS_BY_REPORT",
     "SLOT_CLASS",
     "SLOT_EXAM",
@@ -799,7 +840,9 @@ __all__ = [
     "candidate_missing_slots",
     "default_options_for_slot",
     "extract_filled_slots",
+    "fact_query_kind",
     "fallback_clarification",
+    "is_item_loss_query",
     "is_vague_overall_query",
     "judge_clarification",
     "merge_clarification_reply",

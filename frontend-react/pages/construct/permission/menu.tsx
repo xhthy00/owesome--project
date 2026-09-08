@@ -5,7 +5,6 @@ import { permissionApi, type MenuVisibilityMap } from "@/api/permission";
 
 const routes = [
   { key: "explore", label: "探索广场" },
-  { key: "skills", label: "技能" },
   { key: "analysis", label: "分析工具" },
   { key: "line-reach", label: "达线看板" },
   { key: "report-history", label: "报告历史" },

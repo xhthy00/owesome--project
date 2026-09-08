@@ -16,7 +16,6 @@ import {
   RightOutlined,
   SafetyCertificateOutlined,
   SettingOutlined,
-  ThunderboltOutlined,
   UploadOutlined
 } from "@ant-design/icons";
 import { permissionApi } from "@/api/permission";
@@ -32,7 +31,6 @@ import { CONVERSATION_CHANGED_EVENT } from "@/utils/conversationTitle";
 
 const routes = [
   { key: "explore", path: "/", label: "探索广场", icon: <GlobalOutlined /> },
-  { key: "skills", path: "/construct/skills", label: "技能", icon: <ThunderboltOutlined /> },
   { key: "analysis", path: "/construct/analysis", label: "分析工具", icon: <BarChartOutlined /> },
   { key: "line-reach", path: "/construct/education/line-reach", label: "达线看板", icon: <FundViewOutlined /> },
   { key: "report-history", path: "/construct/analysis/history", label: "报告历史", icon: <HistoryOutlined /> },
