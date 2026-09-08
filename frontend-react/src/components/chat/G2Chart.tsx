@@ -29,7 +29,7 @@ export function isRankAxisColumn(name: string): boolean {
 
 /** 自动推断的 Y 轴若是名次，摘要里改走数据表，其它图（达线率/均分）不受影响。 */
 export function preferQueryTableOverChart(yField?: string): boolean {
-  return Boolean(yField) && isRankAxisColumn(yField);
+  return yField ? isRankAxisColumn(yField) : false;
 }
 
 /** 数值列打分：优先画率/占比，避免默认落到「参考人数」。 */

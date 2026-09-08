@@ -55,7 +55,6 @@ const COLUMN_LABELS: Record<string, string> = {
   city_pct: "全市占比",
   n_class: "班级数",
   class_count: "班级数",
-  total_classes: "班级数",
   gap: "分差",
   pass_line: "及格线",
   excellent_line: "优秀线",
