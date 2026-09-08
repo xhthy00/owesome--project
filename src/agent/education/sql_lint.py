@@ -779,6 +779,11 @@ def lint_edu_sql_blocks(
             "班级全市排名池须洗掉小班与其他校：xxlb NOT LIKE '%其他%'（中专/职校），"
             "整班参考人数 HAVING COUNT(*) >= 10。"
         )
+    if _class_rank_missing_school_type_filter(s, question):
+        blocks.append(
+            "问句已点名引领/支撑/发展校：班级排名池必须 xxlb LIKE '%该类%'，"
+            "禁止用全市普通高中（只排除其他校）当对照池。"
+        )
     if _subject_class_rank_keeps_empty_avg(s, question):
         blocks.append(
             "班级单科全市排名须把该科有效人数为 0 的班排除出池："
@@ -927,6 +932,45 @@ def _dual_class_rank_missing_union(sql: str, question: str | None) -> bool:
     # 只拦「没有 UNION ALL」的混排单查。口径列名允许「物理类方向」等，
     # 不必一字不差写「按选考方向」（否则正确双行 SQL 会被误拦）。
     return not bool(re.search(r"\bUNION\s+ALL\b", s, re.I))
+
+
+def _class_rank_sql_for_question(sql: str, question: str | None) -> bool:
+    """当前问句是班级全市/单科排名，且 SQL 也是对应排名语句。"""
+    try:
+        from src.agent.education.query_parse import (
+            class_city_rank_answer_mode,
+            is_class_subject_city_rank_query,
+        )
+    except Exception:
+        return False
+    q = question or ""
+    if class_city_rank_answer_mode(q):
+        return _is_zf6m_class_city_rank_sql(sql)
+    if is_class_subject_city_rank_query(q):
+        return _is_subject_class_city_rank_sql(sql)
+    return False
+
+
+def _class_rank_missing_school_type_filter(sql: str, question: str | None) -> bool:
+    """问句点名校类，但班级排名 SQL 没有把池子收到该类。"""
+    try:
+        from src.agent.education.query_parse import extract_school_type_target
+    except Exception:
+        return False
+    st = extract_school_type_target(question or "")
+    if not st:
+        return False
+    if not _class_rank_sql_for_question(sql, question):
+        return False
+    s = sql or ""
+    token = re.escape(st)
+    if re.search(rf"xxlb\s+not\s+like\s*['\"]%[^\n'\"]*{token}", s, re.I):
+        return True
+    if re.search(rf"xxlb\s+like\s*['\"]%[^\n'\"]*{token}", s, re.I):
+        return False
+    if re.search(rf"xxlb\s*=\s*['\"][^'\"]*{token}", s, re.I):
+        return False
+    return True
 
 
 def _class_rank_pool_unwashed(sql: str, question: str | None) -> bool:

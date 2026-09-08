@@ -413,6 +413,30 @@ def _score_band_fact_hint() -> str:
     )
 
 
+def _class_rank_pool_hint(question: str, *, mini: bool = False) -> str:
+    """洗净其他校/小班；问句点名校类时对照池必须落在该类。"""
+    from src.agent.education.query_parse import extract_school_type_target
+
+    if mini:
+        wash = (
+            "排名池必须先洗：排除其他校（xxlb NOT LIKE '%其他%'，含中专/职校），"
+            "整班参考人数 HAVING COUNT(*)>=10；"
+        )
+    else:
+        wash = (
+            "排名池必须先洗：排除其他校（xxlb NOT LIKE '%其他%'，含中专/职校），"
+            "排除整班参考人数不足 10 人的小班（先按 xx,bj 计整班人数 HAVING COUNT(*)>=10，再分轨）。"
+        )
+    st = extract_school_type_target(question)
+    if not st:
+        return wash
+    return (
+        wash
+        + f"对照池必须是全市{st}校班级：xxlb LIKE '%{st}%'；"
+        "禁止用全市所有普通高中（只排除其他校）当对照池。"
+    )
+
+
 def _class_city_rank_fact_hint(question: str) -> str:
     """班级全市六门排名：选考方向一行 + 不区分选考一行。"""
     from src.agent.education.query_parse import class_city_rank_answer_mode
@@ -425,10 +449,7 @@ def _class_city_rank_fact_hint(question: str) -> str:
         "用目标校+班算窗口，禁止外层 WHERE 只留下目标班一行。"
         "对话结论只写目标班的名次/总数/均分，不要把附近班整表贴进结论。"
     )
-    wash = (
-        "排名池必须先洗：排除其他校（xxlb NOT LIKE '%其他%'，含中专/职校），"
-        "排除整班参考人数不足 10 人的小班（先按 xx,bj 计整班人数 HAVING COUNT(*)>=10，再分轨）。"
-    )
+    wash = _class_rank_pool_hint(question)
     if mode == "physics":
         return (
             "本题是班级全市排名，问句已点名物理类：只排物理类。"
@@ -581,8 +602,7 @@ def _class_subject_city_rank_fact_hint(question: str) -> str:
         "本题是班级单科全市排名，不是六门总分："
         "禁止 UNION ALL 文理双行，禁止只报 zf6m。"
         f"{col_txt}。"
-        "排名池必须先洗：排除其他校（xxlb NOT LIKE '%其他%'，含中专/职校），"
-        "整班参考人数 HAVING COUNT(*)>=10；"
+        f"{_class_rank_pool_hint(question, mini=True)}"
         "RANK() OVER (ORDER BY 均分 DESC NULLS LAST)，禁止把无分班排第1。"
         "GROUP BY xx,bj 后 COUNT(*) OVER() 为洗净后班级数；"
         "用目标校+班定位窗口：第1名 + 目标班名次前后各3名（含本班并加标记），"
@@ -709,8 +729,9 @@ def build_fact_query_plan_items(question: str) -> list[dict[str, str]]:
         scope_bits.append(f"考试【{exam}】")
     scope = "、".join(scope_bits) if scope_bits else "已确认范围"
     bound_lock = ""
-    if any((exam, school, class_name, spec_district)):
-        lock_bits = [b for b in (exam, school, class_name, spec_district) if b]
+    st_lock = f"{school_type}校" if school_type else ""
+    if any((exam, school, class_name, spec_district, st_lock)):
+        lock_bits = [b for b in (exam, school, class_name, spec_district, st_lock) if b]
         bound_lock = (
             "WHERE 字面量必须等于已绑定："
             + "、".join(lock_bits)

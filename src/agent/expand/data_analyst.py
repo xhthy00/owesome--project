@@ -114,6 +114,7 @@ DATA_ANALYST_DESC = """[分析范围约束]
    `build_subject_diagnosis_sections_tool`，禁止手写 overview 聚合 SQL。
    班级全市排名：`RANK() OVER (ORDER BY 均分 DESC)` + `COUNT(*) OVER()`，
    **禁止** `PARTITION BY bj`，**禁止** `COUNT(DISTINCT bj)`（班名全市重复，不是班级数）。
+   问句点名引领/支撑/发展校时对照池必须 `xxlb LIKE '%该类%'`，禁止只用排除其他校的全市池。
    六门班级全市排名查询结果须含第1名+目标班前后各3名并标记本班；
    `terminate` 只写目标班两个口径的名次/总数/均分，不要把附近班整表贴进结论。
    单科全市班级排名还须洗净其他校（`xxlb NOT LIKE '%其他%'`）和整班不足 10 人，

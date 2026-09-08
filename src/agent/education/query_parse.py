@@ -1595,6 +1595,46 @@ def peel_rhetorical_school_suffix(name: str) -> str:
     return n
 
 
+#: 校名正则会把「1月期末考试扬州中学」收成一团；剥掉考试词后才剩真校名。
+_SCHOOL_NAME_EXAM_PREFIXES = (
+    "质量检测",
+    "模拟考试",
+    "学情检测",
+    "单元测验",
+    "期末考试",
+    "期中考试",
+    "检测试卷",
+    "调研测试",
+    "期末",
+    "期中",
+    "月考",
+    "摸底",
+    "模考",
+    "联考",
+    "统考",
+    "模拟",
+    "考试",
+)
+
+
+def _strip_exam_tokens_from_school_name(name: str) -> str:
+    """「期末考试扬州中学」→「扬州中学」；「考试中学」这类真校名不剥。"""
+    n = str(name or "").strip()
+    prefixes = sorted(_SCHOOL_NAME_EXAM_PREFIXES, key=len, reverse=True)
+    changed = True
+    while changed and n:
+        changed = False
+        for prefix in prefixes:
+            if not n.startswith(prefix) or n == prefix:
+                continue
+            rest = n[len(prefix):]
+            if _school_name_stem(rest):
+                n = rest
+                changed = True
+                break
+    return n
+
+
 def _is_request_speech_school_name(name: str) -> bool:
     """「请分析一下学校」挖空请求语后只剩校名后缀，不是真校名。"""
     stem = _school_name_stem(_strip_school_ask_fillers(name))
@@ -1631,6 +1671,7 @@ def extract_school_targets(question: str) -> list[str]:
                 if name.startswith("月") and re.search(rf"\d月{re.escape(name[1:])}", q):
                     name = name[1:]
                 name = peel_rhetorical_school_suffix(name)
+                name = _strip_exam_tokens_from_school_name(name)
                 if (
                     not name
                     or not _school_name_stem(name)
