@@ -176,16 +176,12 @@ class ConversableAgent:
         system = self.profile.render_system_prompt(self._build_prompt_variables(reply))
         messages: list[dict[str, str]] = [{"role": "system", "content": system}]
 
-        # SQLBot-style: inject windowed conversation history after system prompt
+        # 会话历史不能作为平级 user 任务进入 Agent。调用方确有需要时，只能显式
+        # 提供一条 system capsule；Planner/Team 子任务默认不提供。
         ctx = reply.context if isinstance(reply.context, dict) else {}
-        hist = ctx.get("conversation_history")
-        if not hist and isinstance(ctx.get("constraints"), dict):
-            hist = ctx["constraints"].get("conversation_history")
-        if isinstance(hist, list):
-            from src.chat.service.message_history import to_role_dicts
-
-            for item in to_role_dicts(hist):
-                messages.append(item)
+        capsule = str(ctx.get("context_capsule") or "").strip()
+        if capsule:
+            messages.append({"role": "system", "content": capsule})
 
         for m in rely_messages:
             if m.content:

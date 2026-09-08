@@ -81,6 +81,10 @@ class ConversationRecordResponse(BaseModel):
     conversation_id: int
     user_id: int
     question: str
+    resolved_question: Optional[str] = None
+    turn_type: str = "standalone"
+    parent_record_id: Optional[int] = None
+    context_summary: Optional[str] = None
     sql: Optional[str] = None
     sql_answer: Optional[str] = None
     sql_error: Optional[str] = None

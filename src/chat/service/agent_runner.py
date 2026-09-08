@@ -249,8 +249,16 @@ class _RunConstraints:
     target_exam: str | None = None
     #: 本轮科目（问句或会话继承）。
     target_subject: str | None = None
-    #: SQLBot 风格窗口历史（type=human/ai），注入 LLM messages。
-    conversation_history: list[dict[str, Any]] | None = None
+    #: 统一上下文解析后的唯一当前任务。
+    resolved_question: str | None = None
+    #: standalone / follow_up / retry。
+    turn_type: str = "standalone"
+    #: 仅供单 Agent 根任务消解指代的短背景；不得传给 Planner/Team 子任务。
+    context_capsule: str | None = None
+    #: follow_up 指向的上一条业务记录。
+    parent_record_id: int | None = None
+    #: WAITING 恢复时当前 run 内消息；与会话级 history 互斥。
+    run_history: list[dict[str, Any]] | None = None
     #: 落库用的用户原话。
     user_utterance: str | None = None
     #: 本轮已对齐的考试/校/班/区县字面量，供 SQL 护栏。
@@ -286,8 +294,12 @@ class _RunConstraints:
             ctx["target_exam"] = self.target_exam
         if self.target_subject:
             ctx["target_subject"] = self.target_subject
-        if self.conversation_history:
-            ctx["conversation_history"] = list(self.conversation_history)
+        if self.resolved_question:
+            ctx["resolved_question"] = self.resolved_question
+        if self.turn_type:
+            ctx["turn_type"] = self.turn_type
+        if self.parent_record_id is not None:
+            ctx["parent_record_id"] = self.parent_record_id
         if self.user_utterance:
             ctx["user_utterance"] = self.user_utterance
         if self.bound_literals:
@@ -306,7 +318,6 @@ class _RunConstraints:
         tc = data.get("target_classes")
         rr = data.get("report_route")
         hint = data.get("edu_sql_hint")
-        hist = data.get("conversation_history")
         return cls(
             locked_tables=list(data.get("locked_tables") or []),
             required_keywords=list(data.get("required_keywords") or []),
@@ -321,7 +332,13 @@ class _RunConstraints:
             edu_sql_hint=str(hint).strip() if hint else None,
             target_exam=str(data["target_exam"]).strip() if data.get("target_exam") else None,
             target_subject=str(data["target_subject"]).strip() if data.get("target_subject") else None,
-            conversation_history=list(hist) if isinstance(hist, list) else None,
+            resolved_question=(
+                str(data["resolved_question"]).strip() if data.get("resolved_question") else None
+            ),
+            turn_type=str(data.get("turn_type") or "standalone"),
+            parent_record_id=(
+                int(data["parent_record_id"]) if data.get("parent_record_id") is not None else None
+            ),
             user_utterance=str(data["user_utterance"]).strip() if data.get("user_utterance") else None,
             bound_literals=[
                 str(x).strip()
@@ -362,16 +379,34 @@ def _build_shared_constraints(question: str, user_id: int) -> _RunConstraints:
     )
 
 
-def _attach_conversation_history(
+async def _resolve_request_context(
+    *,
+    request: ChatRequest,
     constraints: _RunConstraints,
-    conversation_id: int | None,
+    handle: "_AgentRunHandle | None",
+    current_user_id: int,
+    llm_client: Any,
 ) -> _RunConstraints:
-    """Load SQLBot-style windowed messages into constraints."""
-    from src.chat.service.message_history import load_windowed_history
+    """解析唯一当前任务；Agent/Team 不再加载 SQLBot role history。"""
+    from src.chat.service.conversation_context import resolve_turn_context
 
-    hist = load_windowed_history(conversation_id)
-    if hist:
-        constraints.conversation_history = hist
+    resolved = await resolve_turn_context(
+        question=request.question,
+        original_question=constraints.user_utterance or request.question,
+        conversation_id=request.conversation_id,
+        user_id=current_user_id,
+        edu_scope=constraints.edu_scope,
+        llm_client=llm_client,
+        is_retry_chat=bool(handle and handle.is_retry_chat),
+        parent_record_id=handle.parent_record_id if handle else None,
+    )
+    request.question = resolved.resolved_question
+    constraints.resolved_question = resolved.resolved_question
+    constraints.turn_type = resolved.turn_type
+    constraints.context_capsule = resolved.context_capsule or None
+    constraints.parent_record_id = resolved.parent_record_id
+    if handle and handle.run_history:
+        constraints.run_history = list(handle.run_history)
     return constraints
 
 
@@ -388,6 +423,8 @@ class _AgentRunHandle:
     is_retry_chat: bool = False
     last_speaker: str | None = None
     message_round: int = 0
+    parent_record_id: int | None = None
+    run_history: list[dict[str, Any]] | None = None
 
 
 def _is_explicit_new_question(question: str) -> bool:
@@ -414,6 +451,7 @@ async def _begin_or_resume_agent_run(
             append_agent_message,
             create_agent_run,
             get_waiting_agent_run,
+            list_agent_messages,
             update_agent_run,
         )
         from src.chat.models.agent_run import RUN_COMPLETE, RUN_RUNNING
@@ -442,6 +480,7 @@ async def _begin_or_resume_agent_run(
                 waiting = None
             if waiting is not None:
                 previous_speaker = waiting.last_speaker
+                parent_record_id = int(waiting.record_id) if waiting.record_id is not None else None
                 next_round = int(waiting.message_round or 0) + 1
                 update_agent_run(
                     session,
@@ -461,11 +500,25 @@ async def _begin_or_resume_agent_run(
                     content=raw_question,
                     context={"is_retry_chat": True},
                 )
+                run_history = [
+                    {
+                        "round": int(item.round),
+                        "sender": item.sender,
+                        "receiver": item.receiver,
+                        "role": item.role,
+                        "content": item.content,
+                        "action_report": item.action_report,
+                        "context": item.context,
+                    }
+                    for item in list_agent_messages(session, int(waiting.id))
+                ]
                 return _AgentRunHandle(
                     run_id=int(waiting.id),
                     is_retry_chat=True,
                     last_speaker=previous_speaker,
                     message_round=next_round,
+                    parent_record_id=parent_record_id,
+                    run_history=run_history,
                 )
             run = create_agent_run(
                 session,
@@ -742,7 +795,13 @@ async def run_agent_stream(
             constraints.is_retry_chat = run_handle.is_retry_chat
             constraints.last_speaker = run_handle.last_speaker
             constraints.message_round = run_handle.message_round
-        _attach_conversation_history(constraints, request.conversation_id)
+        await _resolve_request_context(
+            request=request,
+            constraints=constraints,
+            handle=run_handle,
+            current_user_id=current_user_id,
+            llm_client=llm_client,
+        )
         question_tool = _make_request_question_tool(
             request=request,
             current_user_id=current_user_id,
@@ -787,6 +846,9 @@ async def run_agent_stream(
             request=request,
             current_user_id=current_user_id,
             question=_question_for_persist(request, constraints),
+            resolved_question=constraints.resolved_question or request.question,
+            turn_type=constraints.turn_type,
+            parent_record_id=constraints.parent_record_id,
             sql=phase.state.last_sql,
             sql_error=None if phase.is_success else (phase.fail_reason or ""),
             exec_result=phase.state.last_exec_result,
@@ -873,7 +935,13 @@ async def run_team_stream(
             shared_constraints.is_retry_chat = run_handle.is_retry_chat
             shared_constraints.last_speaker = run_handle.last_speaker
             shared_constraints.message_round = run_handle.message_round
-        _attach_conversation_history(shared_constraints, request.conversation_id)
+        await _resolve_request_context(
+            request=request,
+            constraints=shared_constraints,
+            handle=run_handle,
+            current_user_id=current_user_id,
+            llm_client=llm_client,
+        )
         question_tool = _make_request_question_tool(
             request=request,
             current_user_id=current_user_id,
@@ -1073,6 +1141,9 @@ async def _run_team_stream_legacy(
                 request=request,
                 current_user_id=current_user_id,
                 question=_question_for_persist(request, shared_constraints),
+                resolved_question=shared_constraints.resolved_question or request.question,
+                turn_type=shared_constraints.turn_type,
+                parent_record_id=shared_constraints.parent_record_id,
                 sql="",
                 sql_error=overall_reason,
                 exec_result=None,
@@ -1142,6 +1213,9 @@ async def _run_team_stream_legacy(
         request=request,
         current_user_id=current_user_id,
         question=_question_for_persist(request, shared_constraints),
+        resolved_question=shared_constraints.resolved_question or request.question,
+        turn_type=shared_constraints.turn_type,
+        parent_record_id=shared_constraints.parent_record_id,
         sql=last_good_phase.state.last_sql,
         sql_error=None,
         exec_result=last_good_phase.state.last_exec_result,
@@ -1280,11 +1354,16 @@ async def _run_data_analyst_phase(
         sub_task_index=sub_task_index,
     )
     try:
+        message_context: dict[str, Any] = {
+            "constraints": constraints.to_context() if constraints else {}
+        }
+        if sub_task_index is None and constraints and constraints.context_capsule:
+            message_context["context_capsule"] = constraints.context_capsule
         reply = await agent.generate_reply(
             received_message=AgentMessage(
                 content=question,
                 role="user",
-                context={"constraints": constraints.to_context() if constraints else {}},
+                context=message_context,
             ),
             sender=UserProxyAgent(),
             sub_task_index=sub_task_index,
@@ -2791,11 +2870,27 @@ def _report_html_is_sparse(html: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+def _compact_context_summary(text: str | None, limit: int = 400) -> str | None:
+    """生成下一轮可用的短结论，排除 HTML 与多余空白。"""
+    value = str(text or "").strip()
+    if not value:
+        return None
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    if not value:
+        return None
+    return value if len(value) <= limit else value[: limit - 1] + "…"
+
+
 def _persist_sync(
     *,
     request: ChatRequest,
     current_user_id: int,
     question: str,
+    resolved_question: str | None = None,
+    turn_type: str = "standalone",
+    parent_record_id: int | None = None,
+    context_summary: str | None = None,
     sql: str,
     sql_error: str | None,
     exec_result: dict[str, Any] | None,
@@ -2820,11 +2915,6 @@ def _persist_sync(
         return 0
     try:
         from src.chat.crud import chat as chat_crud
-        from src.chat.service.message_history import (
-            build_turn_log_messages,
-            load_windowed_history,
-            persist_generate_sql_log,
-        )
         from src.common.core.database import get_db_session
 
         with get_db_session() as session:
@@ -2836,6 +2926,12 @@ def _persist_sync(
                 conversation_id=request.conversation_id,
                 user_id=current_user_id,
                 question=question,
+                resolved_question=resolved_question or request.question,
+                turn_type=turn_type,
+                parent_record_id=parent_record_id,
+                context_summary=_compact_context_summary(
+                    context_summary or summary or reasoning or sql_error
+                ),
                 sql=sql or None,
                 sql_error=sql_error,
                 exec_result=exec_result,
@@ -2857,20 +2953,8 @@ def _persist_sync(
             )
             rid = record.id or 0
 
-        # SQLBot-style chat_log: windowed history + this turn Q&A
-        hist = load_windowed_history(int(request.conversation_id))
-        ai_content = (summary or reasoning or sql_error or "").strip() or "(empty)"
-        persist_generate_sql_log(
-            conversation_id=int(request.conversation_id),
-            record_id=rid or None,
-            messages=build_turn_log_messages(
-                history=hist,
-                human_content=question,
-                ai_content=ai_content,
-            ),
-            reasoning_content=reasoning or None,
-            error=not is_success,
-        )
+        # chat_conversation_log 仅属于 legacy SQLBot 链路。Agent/Team 的跨轮事实
+        # 来自 ConversationRecord，WAITING 恢复来自 ChatAgentMessage。
         return rid
     except Exception as e:  # noqa: BLE001
         logger.warning("persist agent record failed: %s", e)

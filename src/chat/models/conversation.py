@@ -36,6 +36,12 @@ class ConversationRecord(SQLModel, table=True):
     conversation_id: int = Field(default=0, sa_column=Column(BigInteger, nullable=False, index=True))
     user_id: int = Field(default=0, sa_column=Column(BigInteger, nullable=False, index=True))
     question: str = Field(default="", sa_column=Column(Text))
+    resolved_question: Optional[str] = Field(default=None, sa_column=Column(Text))
+    turn_type: str = Field(default="standalone", sa_column=Column(Text, nullable=False))
+    parent_record_id: Optional[int] = Field(
+        default=None, sa_column=Column(BigInteger, nullable=True, index=True)
+    )
+    context_summary: Optional[str] = Field(default=None, sa_column=Column(Text))
     sql: Optional[str] = Field(default=None, sa_column=Column(Text))
     sql_answer: Optional[str] = Field(default=None, sa_column=Column(Text))
     sql_error: Optional[str] = Field(default=None, sa_column=Column(Text))

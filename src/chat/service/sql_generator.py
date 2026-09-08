@@ -1,22 +1,22 @@
 """SQL generation service based on SQLBot patterns."""
 
-from typing import Dict, List, Optional, Any, Tuple, Callable
-import logging
 import json
+import logging
 import re
 import time
+from typing import Any, Callable, Dict, List, Optional
+
+from src.chat.utils.sql_validator import extract_sql, format_sql, validate_sql
+from src.common.utils.aes import decrypt_conf
+from src.llm.service import build_chat_messages, create_llm
+from src.templates.sql_gen_prompt import (
+    build_schema_info,
+    build_sql_generation_prompt,
+    parse_llm_sql_response,
+)
 
 StepCallback = Callable[[Dict[str, Any]], None]
 ReasoningCallback = Callable[[str], None]
-
-from src.llm.service import create_llm, build_chat_messages
-from src.templates.sql_gen_prompt import (
-    build_sql_generation_prompt,
-    build_schema_info,
-    parse_llm_sql_response,
-)
-from src.chat.utils.sql_validator import validate_sql, extract_sql, format_sql
-from src.common.utils.aes import decrypt_conf
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +206,12 @@ class SQLGenerator:
             custom_prompt=custom_prompt,
             error_msg=prev_error,
             need_title=need_title,
+        )
+        system_prompt += (
+            "\n\n<conversation-focus>"
+            "历史消息仅用于消解当前问题中的指代。只生成当前 user_prompt 对应的 SQL，"
+            "不得重新回答、合并或执行历史问题。"
+            "</conversation-focus>"
         )
         add_step("prompt", "构建提示词", t2)
 

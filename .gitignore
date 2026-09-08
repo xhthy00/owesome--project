@@ -15,3 +15,12 @@ frontend-react/tsconfig.tsbuildinfo
 temp/
 testdata/
 tests/
+!tests/
+tests/*
+!tests/chat/
+tests/chat/*
+!tests/chat/test_conversation_context.py
+!tests/chat/test_agent_run_waiting.py
+!tests/agent/
+tests/agent/*
+!tests/agent/test_history_isolation.py

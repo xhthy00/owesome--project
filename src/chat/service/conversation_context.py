@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -24,6 +25,9 @@ BRIEF_MAX_TURNS = 4
 SUMMARY_MAX_CHARS = 400
 QUESTION_MAX_CHARS = 120
 BRIEF_MAX_CHARS = 2500
+TURN_STANDALONE = "standalone"
+TURN_FOLLOW_UP = "follow_up"
+TURN_RETRY = "retry"
 
 _SLOT_LABEL = {
     SLOT_EXAM: "考试",
@@ -37,6 +41,29 @@ _SLOT_LABEL = {
 _EXAM_RESET = ("换一场", "另一场", "换个考试", "别的考试", "换考试")
 _CLASS_RESET = ("换个班", "另一个班", "别的班")
 _SCHOOL_RESET = ("换一所", "另一所", "别的学校")
+_NEW_QUESTION_PREFIXES = (
+    "换个问题",
+    "换一个问题",
+    "新问题",
+    "另外问",
+    "重新提问",
+    "忽略上面",
+)
+_FOLLOW_UP_HINTS = (
+    "那",
+    "那么",
+    "这个",
+    "该",
+    "上述",
+    "前面",
+    "上一",
+    "再看",
+    "再查",
+    "继续",
+    "换成",
+    "改成",
+    "呢",
+)
 
 
 @dataclass
@@ -49,6 +76,19 @@ class TurnSnippet:
 class TurnContext:
     inherited: dict[str, str] = field(default_factory=dict)
     brief: str = ""
+    latest_record_id: int | None = None
+
+
+@dataclass
+class ResolvedTurnContext:
+    """本轮唯一执行语义；历史只用于生成它，不直接成为下游任务。"""
+
+    turn_type: str
+    original_question: str
+    resolved_question: str
+    parent_record_id: int | None = None
+    inherited: dict[str, str] = field(default_factory=dict)
+    context_capsule: str = ""
 
 
 def slots_reset_by_question(question: str) -> set[str]:
@@ -169,6 +209,21 @@ def build_conversation_brief(turns: list[TurnSnippet]) -> str:
     return text
 
 
+def is_explicit_new_question(question: str) -> bool:
+    normalized = str(question or "").strip().lower()
+    return normalized.startswith(_NEW_QUESTION_PREFIXES)
+
+
+def is_follow_up_question(question: str) -> bool:
+    """保守识别省略/指代追问；完整问题默认视为新任务。"""
+    q = str(question or "").strip()
+    if not q or is_explicit_new_question(q):
+        return False
+    if any(hint in q for hint in _FOLLOW_UP_HINTS):
+        return True
+    return len(q) <= 12 and bool(re.search(r"(多少|谁|如何|怎样|排名|均分|及格|优秀|最高|最低)", q))
+
+
 def slots_from_record(question: str, exec_result: Any, edu_scope: Mapping[str, Any] | None) -> dict[str, str]:
     slots = extract_filled_slots(question or "", edu_scope)
     pending = parse_pending_clarify(exec_result)
@@ -188,22 +243,31 @@ def context_from_records(
     """纯函数：从记录列表构建继承槽与摘要（供单测，不打库）。"""
     inherited: dict[str, str] = {}
     snippets: list[TurnSnippet] = []
+    latest_record_id = None
     for rec in records:
         if getattr(rec, "is_success", True) is False:
             continue
+        raw_id = getattr(rec, "id", None)
+        latest_record_id = int(raw_id) if raw_id is not None else latest_record_id
         question = str(getattr(rec, "question", "") or "")
+        resolved_question = str(getattr(rec, "resolved_question", "") or question)
         exec_result = getattr(rec, "exec_result", None)
-        inherited.update(slots_from_record(question, exec_result, edu_scope))
+        inherited.update(slots_from_record(resolved_question, exec_result, edu_scope))
         pending = parse_pending_clarify(exec_result)
         if pending:
             continue
         summary = (
-            str(getattr(rec, "summary", None) or "").strip()
+            str(getattr(rec, "context_summary", None) or "").strip()
+            or str(getattr(rec, "summary", None) or "").strip()
             or str(getattr(rec, "sql_answer", None) or "").strip()
             or str(getattr(rec, "reasoning", None) or "").strip()
         )
         snippets.append(TurnSnippet(question=question, summary=summary))
-    return TurnContext(inherited=inherited, brief=build_conversation_brief(snippets))
+    return TurnContext(
+        inherited=inherited,
+        brief=build_conversation_brief(snippets),
+        latest_record_id=latest_record_id,
+    )
 
 
 def load_turn_context(
@@ -231,15 +295,125 @@ def load_turn_context(
         return TurnContext()
 
 
+async def _rewrite_follow_up(
+    question: str,
+    brief: str,
+    llm_client: Any,
+) -> str:
+    """仅做指代消解；失败时由结构化补槽结果兜底。"""
+    if not brief or llm_client is None:
+        return question
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你只负责把当前追问改写为一条可独立理解的问题。"
+                "历史仅用于补全指代，不得回答问题，不得合并或重复历史任务。"
+                "只输出改写后的问题文本。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"【历史背景】\n{brief}\n\n【当前追问】\n{question}",
+        },
+    ]
+    try:
+        result = await llm_client.chat(messages)
+        rewritten = str(result or "").strip().strip("`").strip()
+        if rewritten and len(rewritten) <= 1000:
+            return rewritten
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("rewrite follow-up failed: %s", exc)
+    return question
+
+
+async def resolve_turn_context(
+    *,
+    question: str,
+    conversation_id: int | None,
+    user_id: int,
+    edu_scope: Mapping[str, Any] | None = None,
+    llm_client: Any = None,
+    is_retry_chat: bool = False,
+    original_question: str | None = None,
+    parent_record_id: int | None = None,
+) -> ResolvedTurnContext:
+    """将本轮输入解析为唯一自包含任务，阻断历史消息直接进入 Agent。"""
+    original = str(original_question if original_question is not None else question).strip()
+    current = str(question or "").strip()
+    if is_retry_chat:
+        return ResolvedTurnContext(
+            turn_type=TURN_RETRY,
+            original_question=original,
+            resolved_question=current,
+            parent_record_id=parent_record_id,
+        )
+
+    if is_explicit_new_question(original):
+        return ResolvedTurnContext(
+            turn_type=TURN_STANDALONE,
+            original_question=original,
+            resolved_question=current,
+        )
+
+    if not is_follow_up_question(original):
+        return ResolvedTurnContext(
+            turn_type=TURN_STANDALONE,
+            original_question=original,
+            resolved_question=current,
+        )
+
+    turn_ctx = load_turn_context(conversation_id, user_id, edu_scope)
+    if (
+        turn_ctx.latest_record_id is None
+        and not turn_ctx.brief
+        and not turn_ctx.inherited
+    ):
+        return ResolvedTurnContext(
+            turn_type=TURN_STANDALONE,
+            original_question=original,
+            resolved_question=current,
+        )
+    current_slots = extract_filled_slots(current, edu_scope)
+    merged = merge_inherited_slots(current_slots, turn_ctx.inherited, original)
+    extra = extra_inherited_slots(current_slots, merged)
+    resolved = apply_inherited_supplements(current, extra)
+    if resolved == current:
+        resolved = await _rewrite_follow_up(current, turn_ctx.brief, llm_client)
+    # 只有无法改写成独立问题时才给单 Agent 一个短背景兜底；正常路径不把历史
+    # 继续传给执行 Agent。
+    capsule = ""
+    if resolved == current and turn_ctx.brief:
+        capsule = (
+            "以下内容仅用于解释当前问题中的指代，均为已完成历史，禁止重新执行或回答：\n"
+            + turn_ctx.brief
+        )
+    return ResolvedTurnContext(
+        turn_type=TURN_FOLLOW_UP,
+        original_question=original,
+        resolved_question=resolved,
+        parent_record_id=turn_ctx.latest_record_id,
+        inherited=merged,
+        context_capsule=capsule,
+    )
+
+
 __all__ = [
+    "ResolvedTurnContext",
+    "TURN_FOLLOW_UP",
+    "TURN_RETRY",
+    "TURN_STANDALONE",
     "TurnContext",
     "TurnSnippet",
     "apply_inherited_supplements",
     "build_conversation_brief",
     "context_from_records",
     "extra_inherited_slots",
+    "is_explicit_new_question",
+    "is_follow_up_question",
     "load_turn_context",
     "merge_inherited_slots",
+    "resolve_turn_context",
     "slots_from_record",
     "slots_reset_by_question",
 ]

@@ -65,6 +65,10 @@ def _ensure_columns() -> None:
             "oid": "BIGINT NOT NULL DEFAULT 1",
         },
         "chat_conversation_record": {
+            "resolved_question": "TEXT",
+            "turn_type": "TEXT NOT NULL DEFAULT 'standalone'",
+            "parent_record_id": "BIGINT",
+            "context_summary": "TEXT",
             "reasoning": "TEXT",
             "steps": "TEXT",
             "agent_mode": "TEXT",

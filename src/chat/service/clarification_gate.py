@@ -109,17 +109,23 @@ def _apply_filled(constraints: _RunConstraints, filled: dict[str, str]) -> None:
         pass
 
 
-def _recent_history(conversation_id: int | None) -> list[dict[str, str]]:
-    """近几轮对话，供 LLM 从上下文里补槽（对标 DB-GPT 的 most_recent_memories）。"""
+def _recent_history(
+    conversation_id: int | None,
+    user_id: int,
+    edu_scope: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    """过滤后的短背景，仅供 Intent 补槽，不重放 SQLBot role history。"""
     if not conversation_id:
         return []
     try:
-        from src.chat.service.message_history import load_windowed_history, to_role_dicts
+        from src.chat.service.conversation_context import load_turn_context
 
-        return to_role_dicts(load_windowed_history(int(conversation_id)))
+        brief = load_turn_context(int(conversation_id), int(user_id), edu_scope).brief
+        if brief:
+            return [{"role": "system", "content": brief}]
     except Exception as exc:  # noqa: BLE001
         logger.warning("load intent history failed: %s", exc)
-        return []
+    return []
 
 
 async def _load_options_for_slot(
@@ -247,6 +253,7 @@ async def _link_or_clarify(
             filled=dict(result.bound or filled),
             route=route,
             persist_question=persist_question,
+            effective_question=effective_question,
             intent=intent,
         )
     changed = {
@@ -288,6 +295,7 @@ async def maybe_clarify_turn(
     from src.chat.service.conversation_context import (
         apply_inherited_supplements,
         extra_inherited_slots,
+        is_follow_up_question,
         load_turn_context,
         merge_inherited_slots,
     )
@@ -319,12 +327,18 @@ async def maybe_clarify_turn(
     constraints = _build_shared_constraints(request.question, current_user_id)
     constraints.report_audience = request.report_audience
     constraints.user_utterance = persist_question
+    constraints.is_retry_chat = bool(pending)
+    should_inherit = bool(pending) or is_follow_up_question(persist_question)
 
     edu = constraints.edu_scope or {}
     route, intent = await classify_and_extract(
         request.question,
         llm_client,
-        history=_recent_history(request.conversation_id),
+        history=(
+            _recent_history(request.conversation_id, current_user_id, edu)
+            if should_inherit
+            else []
+        ),
         edu_scope=edu,
         prev_intent=pending.get("intent") if pending else None,
     )
@@ -334,8 +348,16 @@ async def maybe_clarify_turn(
     # 学生本人学号），那些 LLM 看不到；问句里明说的值以 LLM 为准。
     current_filled = extract_filled_slots(request.question, edu)
     current_filled.update(sanitize_llm_slots(intent.slots))
-    turn_ctx = load_turn_context(request.conversation_id, current_user_id, edu)
-    filled = merge_inherited_slots(current_filled, turn_ctx.inherited, request.question)
+    turn_ctx = (
+        load_turn_context(request.conversation_id, current_user_id, edu)
+        if should_inherit
+        else None
+    )
+    filled = (
+        merge_inherited_slots(current_filled, turn_ctx.inherited, request.question)
+        if turn_ctx is not None
+        else current_filled
+    )
     extra = extra_inherited_slots(current_filled, filled)
     # user_input 是 LLM 补全后的完整指令；「补充：标签=值」标记必须保留——
     # 下游 sub_task 与工具会对 user_question 做正则抽取，纯改写会打断这条链路。
@@ -419,6 +441,7 @@ async def maybe_clarify_turn(
         filled=filled,
         route=route,
         persist_question=persist_question,
+        effective_question=effective_question,
         intent=intent,
     )
     halted.effective_question = effective_question
@@ -438,6 +461,7 @@ async def _emit_and_persist_clarify(
     filled: dict[str, str],
     route: ReportRoute,
     persist_question: str,
+    effective_question: str,
     intent: EduIntent | None = None,
 ) -> ClarifyTurnResult:
     payload = need.to_payload()
@@ -452,6 +476,8 @@ async def _emit_and_persist_clarify(
             request=request,
             current_user_id=current_user_id,
             question=persist_question,
+            resolved_question=effective_question,
+            turn_type="retry" if constraints.is_retry_chat else "standalone",
             sql="",
             sql_error=None,
             exec_result=payload,
