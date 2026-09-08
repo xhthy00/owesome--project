@@ -26,6 +26,11 @@ _SCHOOL_ASK_FILLERS = (
     "请帮我看下",
     "请帮我看",
     "请帮我",
+    "请告诉我一下",
+    "请告诉我",
+    "请告诉",
+    "告诉我一下",
+    "告诉我",
     "帮我分析",
     "帮我看看",
     "帮我看一下",
@@ -96,6 +101,9 @@ _TOP_STUDENT_LOOKUP_HINTS = (
     "谁考得最好",
     "谁考第一",
     "第一名是谁",
+    "班级第一是谁",
+    "年级第一是谁",
+    "全校第一是谁",
     "成绩最好的是谁",
     "分数最高的学生",
     "最高分的学生是谁",
@@ -604,6 +612,88 @@ def is_score_stat_query(question: str) -> bool:
     return False
 
 
+_RANK_HINTS = (
+    "排名",
+    "名次",
+    "排第",
+    "第几名",
+    "第一名",
+    "班级第一",
+    "年级第一",
+    "全校第一",
+    "冠军",
+    "最高者",
+)
+_ORDINAL_ITEM_RE = re.compile(r"第\s*[一二三四五六七八九十百\d]+\s*(?:小题|题)")
+_TOP_PERSON_RE = re.compile(r"第一\s*(?:是谁|的(?:学生|同学)|$)")
+
+
+def is_rank_query(question: str) -> bool:
+    """单场排名事实问；历次/趋势不按一场考试追问。"""
+    q = (question or "").strip()
+    if not q:
+        return False
+    if any(h in q for h in _SCORE_STAT_MULTI_EXAM):
+        return False
+    # “第一小题”是题号，不是名次；先移除题号片段再匹配“第一”等排名表达。
+    q = _ORDINAL_ITEM_RE.sub("", q)
+    return any(h in q for h in _RANK_HINTS) or bool(_TOP_PERSON_RE.search(q))
+
+
+_TRACK_STRIP_FOR_CLASS_RANK = re.compile(r"物理类|物理方向|历史类|历史方向|理科|文科")
+
+
+def is_class_city_rank_query(question: str) -> bool:
+    """点名班级的全市六门/总分排名（非单科、非优势薄弱）。"""
+    q = (question or "").strip()
+    if not q or not is_rank_query(q):
+        return False
+    if "班" not in q:
+        return False
+    if not any(m in q for m in ("全市", "全域", "市域")):
+        return False
+    if is_subject_strength_query(q):
+        return False
+    stripped = _TRACK_STRIP_FOR_CLASS_RANK.sub("", q)
+    if any(s in stripped for s in _SUBJECT_NAME_TOKENS):
+        return False
+    return True
+
+
+def is_class_subject_city_rank_query(question: str) -> bool:
+    """点名班级的单科全市班级排名（英语/数学等，不是六门总分）。"""
+    q = (question or "").strip()
+    if not q or not is_rank_query(q):
+        return False
+    if "班" not in q:
+        return False
+    if not any(m in q for m in ("全市", "全域", "市域")):
+        return False
+    if is_subject_strength_query(q):
+        return False
+    if is_class_city_rank_query(q):
+        return False
+    stripped = _TRACK_STRIP_FOR_CLASS_RANK.sub("", q)
+    return any(s in stripped for s in _SUBJECT_NAME_TOKENS)
+
+
+def class_city_rank_answer_mode(question: str) -> str:
+    """dual / physics / history / mixed；非本问法返回空串。"""
+    q = (question or "").strip()
+    if not is_class_city_rank_query(q):
+        return ""
+    only_mixed = any(h in q for h in ("不分文理", "所有班级"))
+    only_phy = (not only_mixed) and any(h in q for h in ("物理类", "物理方向", "理科"))
+    only_his = (not only_mixed) and any(h in q for h in ("历史类", "历史方向", "文科"))
+    if only_phy and not only_his:
+        return "physics"
+    if only_his and not only_phy:
+        return "history"
+    if only_mixed:
+        return "mixed"
+    return "dual"
+
+
 def is_oral_score_inquiry(question: str) -> bool:
     """闸门用：口语分数问（含「成绩/情况」），不含报告/多场。"""
     q = (question or "").strip()
@@ -758,6 +848,9 @@ def is_school_vs_city_avg_query(question: str) -> bool:
     """点名学校或本校的均分与全市比较：事实查询，禁止班级横向/全市区县均分报告。"""
     q = (question or "").strip()
     if not q:
+        return False
+    # 优势/薄弱学科也常带「全市+均分」，但是各科排名相对位置，不是校均 vs 市均两行对比
+    if is_subject_strength_query(q):
         return False
     if not extract_school_target(q) and "本校" not in q and "我校" not in q:
         return False
@@ -1465,13 +1558,86 @@ def _normalize_school_extract_blob(blob: str) -> str:
     return _CODED_SCHOOL_PREFIX_RE.sub(r" \1", out)
 
 
+def _strip_school_ask_fillers(name: str) -> str:
+    """反复剥掉校名前的请求语（「请告诉我扬大附中」→「扬大附中」）。"""
+    out = name or ""
+    fillers = sorted(_SCHOOL_ASK_FILLERS, key=len, reverse=True)
+    changed = True
+    while changed and out:
+        changed = False
+        for prefix in fillers:
+            if out.startswith(prefix):
+                out = out[len(prefix) :]
+                changed = True
+                break
+    return out
+
+
 def _school_name_stem(name: str) -> str:
     return re.sub(_SCHOOL_SUFFIX + r"$", "", name)
 
 
+# 完整校名后缀后再挂的口语「学校」（「扬大附中学校最优势学科」），不是真校名一部分。
+_COMPLETE_SCHOOL_TAIL_RE = re.compile(r"(?:中学|学院|大学|附中|分校)$")
+
+
+def peel_rhetorical_school_suffix(name: str) -> str:
+    """剥掉「已是完整校名 + 口语学校」的尾巴。
+
+    「扬大附中学校」→「扬大附中」；「实验学校」「某某学校」保持不变。
+    """
+    n = re.sub(r"\s+", "", str(name or ""))
+    if not n.endswith("学校"):
+        return n
+    stem = n[:-2]
+    if stem and _COMPLETE_SCHOOL_TAIL_RE.search(stem):
+        return stem
+    return n
+
+
+#: 校名正则会把「1月期末考试扬州中学」收成一团；剥掉考试词后才剩真校名。
+_SCHOOL_NAME_EXAM_PREFIXES = (
+    "质量检测",
+    "模拟考试",
+    "学情检测",
+    "单元测验",
+    "期末考试",
+    "期中考试",
+    "检测试卷",
+    "调研测试",
+    "期末",
+    "期中",
+    "月考",
+    "摸底",
+    "模考",
+    "联考",
+    "统考",
+    "模拟",
+    "考试",
+)
+
+
+def _strip_exam_tokens_from_school_name(name: str) -> str:
+    """「期末考试扬州中学」→「扬州中学」；「考试中学」这类真校名不剥。"""
+    n = str(name or "").strip()
+    prefixes = sorted(_SCHOOL_NAME_EXAM_PREFIXES, key=len, reverse=True)
+    changed = True
+    while changed and n:
+        changed = False
+        for prefix in prefixes:
+            if not n.startswith(prefix) or n == prefix:
+                continue
+            rest = n[len(prefix):]
+            if _school_name_stem(rest):
+                n = rest
+                changed = True
+                break
+    return n
+
+
 def _is_request_speech_school_name(name: str) -> bool:
     """「请分析一下学校」挖空请求语后只剩校名后缀，不是真校名。"""
-    stem = _school_name_stem(name)
+    stem = _school_name_stem(_strip_school_ask_fillers(name))
     if stem.startswith("请"):
         stem = stem[1:]
     fillers = sorted(_SCHOOL_ASK_FILLERS, key=len, reverse=True)
@@ -1500,13 +1666,12 @@ def extract_school_targets(question: str) -> list[str]:
         for pat in _SCHOOL_PATTERNS:
             for m in pat.finditer(blob):
                 name = re.sub(r"\s+", "", m.group(1))
-                for prefix in _SCHOOL_ASK_FILLERS:
-                    if name.startswith(prefix):
-                        name = name[len(prefix):]
-                        break
+                name = _strip_school_ask_fillers(name)
                 # 「3月扬州中学」勿把月份的「月」拼进校名
                 if name.startswith("月") and re.search(rf"\d月{re.escape(name[1:])}", q):
                     name = name[1:]
+                name = peel_rhetorical_school_suffix(name)
+                name = _strip_exam_tokens_from_school_name(name)
                 if (
                     not name
                     or not _school_name_stem(name)
@@ -2298,12 +2463,9 @@ def resolve_comprehensive_table_input(
             best = er
             best_key = key
 
-    # 上游是学生明细且明显更全，或 LLM 未传数据 → 改用上游
+    # 仅学生级成绩明细可作为报告输入。班级 KPI 聚合即使行数更多也不能回退使用，
+    # 否则会被误当成长表聚合成空 records，最终生成残缺报告或触发 IndexError。
     if best and best_key[0] == 1 and (best_key[1] > llm_n or llm_n == 0):
-        return None, list(best["rows"]), [str(c) for c in best["columns"]], True
-    if best and best_key[1] > llm_n:
-        return None, list(best["rows"]), [str(c) for c in best["columns"]], True
-    if llm_n == 0 and best:
         return None, list(best["rows"]), [str(c) for c in best["columns"]], True
     return records, rows, columns, False
 
@@ -2547,6 +2709,7 @@ __all__ = [
     "extract_district_target",
     "extract_exam_name_hint",
     "extract_school_target",
+    "peel_rhetorical_school_suffix",
     "extract_school_type_target",
     "extract_student_id_target",
     "extract_student_target",
@@ -2564,6 +2727,10 @@ __all__ = [
     "is_line_reach_citywide_scope",
     "is_line_reach_query",
     "is_score_stat_query",
+    "is_rank_query",
+    "is_class_city_rank_query",
+    "is_class_subject_city_rank_query",
+    "class_city_rank_answer_mode",
     "is_oral_score_inquiry",
     "has_class_alias",
     "extract_bare_class_number",

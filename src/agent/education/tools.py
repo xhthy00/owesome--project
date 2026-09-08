@@ -4105,13 +4105,8 @@ def build_comprehensive_report_data_tool(
     ``terminate``，**无需再调 ``render_html_report``、也无需回填大 data 字典**
     （回填巨大字典会因 JSON 过长被截断，触发"必须是 JSON 对象"错误）。
 
-    **两种入参**（二选一）：
-
-    - ``records``：已结构化的列表，每条
-      ``{exam, student, subjects: {科目: 分数}, total}``；
-    - ``rows`` + ``columns`` + 字段名：传 execute_sql 的长表结果（每行一次考试
-      一名学生一个科目一条分数），本工具自动按 (exam, student) 聚合 ``subjects``
-      与 ``total``。``total_field`` 列若不存在则按学生各科求和。
+    LLM 只传 ``class_name`` 等轻量范围参数。``records`` 或 ``rows + columns``
+    仅供确定性代码调用；Agent 路径由运行时从上游 SQL 注入完整明细，禁止模型手填。
 
     **全量兜底**：运行时会注入 ``tool_runtime_ctx.last_exec_result`` /
     ``report_data``；若 LLM 只抄了 execute_sql preview（默认 20 行），工具自动
@@ -4569,14 +4564,13 @@ def build_student_exam_report_data_tool(
     **这是个体学生多次考试分析的关键工具**：内部完成数据组装 + 模板渲染 +
     HTML 上报。LLM 调完只需 ``terminate``，无需再调 ``render_html_report``。
 
-    ``records`` 应包含**全班**历次考试数据（用于排名/班级均分），工具会按
-    ``student_name`` / ``student_id`` 过滤出目标学生并生成**一份**报告。
+    LLM 只传目标学生、班级等轻量范围参数。全班历次考试数据由运行时从上游
+    SQL 注入（用于排名/班级均分），工具会过滤出目标学生并生成**一份**报告。
     有 ``datasource_id`` 时自动拉取该生小题/知识点明细，写入报告第四节与备考建议。
 
     Args:
         student_name: 目标学生姓名/学号别名（如「学生001」）。
         student_id: 学号（与 student_name 二选一，优先 student_name）。
-        records / rows+columns: 与 ``build_comprehensive_report_data_tool`` 相同。
         exam_order: 考试顺序（最早→最近）。
         class_name: 班级名。
         class_size: 班级人数；缺省时从数据推断。

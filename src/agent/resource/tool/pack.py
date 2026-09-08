@@ -21,9 +21,14 @@ class ToolPack:
         self,
         tools: Iterable[BaseTool] | None = None,
         bindings: dict[str, Any] | None = None,
+        hidden_parameters: dict[str, set[str]] | None = None,
     ) -> None:
         self._tools: dict[str, BaseTool] = {}
         self._bindings: dict[str, Any] = dict(bindings or {})
+        self._hidden_parameters = {
+            str(name): set(params)
+            for name, params in (hidden_parameters or {}).items()
+        }
         if tools:
             for t in tools:
                 self.register(t)
@@ -55,16 +60,31 @@ class ToolPack:
     def bind(self, **bindings: Any) -> "ToolPack":
         """返回一个带了额外绑定的新 ToolPack（不修改原实例）。"""
         merged = {**self._bindings, **bindings}
-        new_pack = ToolPack(bindings=merged)
+        new_pack = ToolPack(
+            bindings=merged,
+            hidden_parameters=self._hidden_parameters,
+        )
         new_pack._tools = dict(self._tools)
         return new_pack
 
     def with_tools(self, tools: Iterable[BaseTool]) -> "ToolPack":
         """Return a new pack containing additional request-scoped tools."""
-        new_pack = ToolPack(bindings=self._bindings)
+        new_pack = ToolPack(
+            bindings=self._bindings,
+            hidden_parameters=self._hidden_parameters,
+        )
         new_pack._tools = dict(self._tools)
         for tool in tools:
             new_pack.register(tool)
+        return new_pack
+
+    def hide_parameters(self, mapping: dict[str, Iterable[str]]) -> "ToolPack":
+        """Return a pack with selected runtime parameters hidden from LLM prompts."""
+        hidden = {name: set(params) for name, params in self._hidden_parameters.items()}
+        for tool_name, params in mapping.items():
+            hidden.setdefault(str(tool_name), set()).update(str(p) for p in params)
+        new_pack = ToolPack(bindings=self._bindings, hidden_parameters=hidden)
+        new_pack._tools = dict(self._tools)
         return new_pack
 
     @property
@@ -89,7 +109,8 @@ class ToolPack:
         hidden = set(self._bindings.keys())
         lines: list[str] = []
         for t in self._tools.values():
-            visible = [p for p in t.parameters if p.name not in hidden]
+            tool_hidden = hidden | self._hidden_parameters.get(t.name, set())
+            visible = [p for p in t.parameters if p.name not in tool_hidden]
             if not visible:
                 lines.append(f"- {t.name}: {t.description}")
                 continue

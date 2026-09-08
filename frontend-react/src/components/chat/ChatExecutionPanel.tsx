@@ -28,7 +28,13 @@ import {
   ReportPayload,
   formatReportDisplayTitle
 } from "@/hooks/useChat";
-import G2Chart, { G2ChartType, formatQuerySetLabel, inferChartFields, pickYField } from "@/components/chat/G2Chart";
+import G2Chart, {
+  G2ChartType,
+  formatQuerySetLabel,
+  inferChartFields,
+  pickYField,
+  preferQueryTableOverChart
+} from "@/components/chat/G2Chart";
 import { labelColumn } from "@/utils/columnLabels";
 import { formatNumericDisplay } from "@/utils/formatNumericDisplay";
 import ReactMarkdown from "react-markdown";
@@ -86,6 +92,12 @@ function formatQueryCell(value: unknown): string {
   return normalizeToText(value);
 }
 
+function isTargetRankRow(columns: string[], row: unknown[]): boolean {
+  const idx = columns.findIndex((col) => /标记|本班/.test(col));
+  if (idx < 0) return false;
+  return String((row as unknown[])[idx] ?? "").includes("本班");
+}
+
 function QueryResultTable({
   columns,
   rows,
@@ -123,7 +135,7 @@ function QueryResultTable({
         </thead>
         <tbody>
           {rows.map((row, idx) => (
-            <tr key={idx}>
+            <tr key={idx} className={isTargetRankRow(columns, row as unknown[]) ? "bg-[#eff6ff] dark:bg-[#172554]" : undefined}>
               {columns.map((col, colIdx) => (
                 <td
                   key={`${idx}-${col}`}
@@ -418,6 +430,16 @@ export default function ChatExecutionPanel({
     const yCandidates = (cfg.y || []).filter((col) => cols.includes(col));
     return { xField, yField: pickYField(yCandidates) };
   }, [activeQuery, scopedQueryResults, chartByRunId]);
+  const preferQueryTable = useMemo(() => {
+    if (!activeQuery) return false;
+    const fields = inferChartFields(activeQuery.columns, activeQuery.rows, {
+      xField: chartFieldOverride.xField,
+      yField: chartFieldOverride.yField
+    });
+    return preferQueryTableOverChart(fields.yField);
+  }, [activeQuery, chartFieldOverride]);
+  // 排名问句默认出表（附近班对照），不用名次当柱高
+  const effectiveResultTab = preferQueryTable && resultTab === "chart" ? "data" : resultTab;
   const pagedRows = useMemo(() => {
     if (!activeQuery) return [];
     const start = (dataPage - 1) * pageSize;
@@ -443,10 +465,10 @@ export default function ChatExecutionPanel({
       return prev;
     });
   }, [scopedReports]);
-  // 本轮有报告时切到摘要（含报告刚到达、或切换历史轮次）
+  // 本轮有报告或结论时切到摘要（事实问答没有 HTML 报告，也要露出摘要）
   useEffect(() => {
-    if (scopedReports.length) setActiveTab("summary");
-  }, [selectedRunId, scopedReports.length]);
+    if (scopedReports.length || scopedSummary.trim()) setActiveTab("summary");
+  }, [selectedRunId, scopedReports.length, scopedSummary]);
   const rawSelectedTitle = normalizeToText(selectedStep?.title);
   const isToolResultStep = /^工具结果:/i.test(rawSelectedTitle);
   const isStepError =
@@ -1064,21 +1086,23 @@ export default function ChatExecutionPanel({
                       </select>
                     </div>
                     <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => setResultTab("chart")}
-                        className={`rounded px-2 py-1 text-[11px] ${resultTab === "chart" ? "bg-[#dbeafe] text-[#1d4ed8]" : "text-[#667085]"}`}
-                      >
-                        图表
-                      </button>
+                      {preferQueryTable ? null : (
+                        <button
+                          onClick={() => setResultTab("chart")}
+                          className={`rounded px-2 py-1 text-[11px] ${effectiveResultTab === "chart" ? "bg-[#dbeafe] text-[#1d4ed8]" : "text-[#667085]"}`}
+                        >
+                          图表
+                        </button>
+                      )}
                       <button
                         onClick={() => setResultTab("data")}
-                        className={`rounded px-2 py-1 text-[11px] ${resultTab === "data" ? "bg-[#dbeafe] text-[#1d4ed8]" : "text-[#667085]"}`}
+                        className={`rounded px-2 py-1 text-[11px] ${effectiveResultTab === "data" ? "bg-[#dbeafe] text-[#1d4ed8]" : "text-[#667085]"}`}
                       >
                         数据
                       </button>
                       <button
                         onClick={() => setResultTab("sql")}
-                        className={`rounded px-2 py-1 text-[11px] ${resultTab === "sql" ? "bg-[#dbeafe] text-[#1d4ed8]" : "text-[#667085]"}`}
+                        className={`rounded px-2 py-1 text-[11px] ${effectiveResultTab === "sql" ? "bg-[#dbeafe] text-[#1d4ed8]" : "text-[#667085]"}`}
                       >
                         SQL
                       </button>
@@ -1096,7 +1120,7 @@ export default function ChatExecutionPanel({
                     </div>
                   </div>
 
-                  {resultTab === "chart" ? (
+                  {effectiveResultTab === "chart" ? (
                     <div className="rounded-md border border-[#e5e7eb] p-3 dark:border-[#2f3441]">
                       <div className="mb-2 flex items-center justify-between">
                         <div className="text-xs font-semibold text-[#344054] dark:text-[#cbd5e1]">
@@ -1150,7 +1174,7 @@ export default function ChatExecutionPanel({
                     </div>
                   ) : null}
 
-                  {resultTab === "data" ? (
+                  {effectiveResultTab === "data" ? (
                     <QueryResultTable
                       columns={activeQuery.columns}
                       rows={pagedRows}
@@ -1162,7 +1186,7 @@ export default function ChatExecutionPanel({
                     />
                   ) : null}
 
-                  {resultTab === "sql" ? (
+                  {effectiveResultTab === "sql" ? (
                     <div className="rounded-md border border-[#1f314f] bg-gray-900 p-3">
                       <div className="mb-1 flex items-center gap-2 text-xs text-[#9ca3af]">
                         <CodeOutlined />

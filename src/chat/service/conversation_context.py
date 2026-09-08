@@ -225,14 +225,22 @@ def is_follow_up_question(question: str) -> bool:
 
 
 def slots_from_record(question: str, exec_result: Any, edu_scope: Mapping[str, Any] | None) -> dict[str, str]:
+    from src.agent.education.clarification import SLOT_SCHOOL
+    from src.agent.education.query_parse import peel_rhetorical_school_suffix
+
     slots = extract_filled_slots(question or "", edu_scope)
     pending = parse_pending_clarify(exec_result)
     blob = pending if pending else (exec_result if isinstance(exec_result, dict) else None)
     if blob and isinstance(blob.get("filled"), dict):
         for key, raw in blob["filled"].items():
             val = str(raw or "").strip()
-            if val:
-                slots[str(key)] = val
+            if not val:
+                continue
+            if str(key) == SLOT_SCHOOL:
+                val = peel_rhetorical_school_suffix(val)
+                if not val:
+                    continue
+            slots[str(key)] = val
     return {k: v for k, v in slots.items() if str(v or "").strip()}
 
 

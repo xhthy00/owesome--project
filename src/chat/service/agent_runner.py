@@ -1430,6 +1430,36 @@ async def _run_data_analyst_phase(
     )
 
 
+def _preselected_report_tool_call(
+    sub_task: str,
+    constraints: _RunConstraints | None,
+) -> dict[str, Any] | None:
+    """Return a deterministic lightweight call for uniquely routed heavy reports."""
+    if constraints is None or not isinstance(constraints.report_route, dict):
+        return None
+    report_type = str(constraints.report_route.get("report_type") or "")
+    candidates = {
+        "comprehensive": "build_comprehensive_report_data_tool",
+        "student_profile": "build_student_exam_report_data_tool",
+    }
+    tool_name = candidates.get(report_type)
+    if not tool_name or tool_name not in (sub_task or ""):
+        return None
+
+    args: dict[str, Any] = {"render": True}
+    if constraints.target_classes:
+        args["class_name"] = str(constraints.target_classes[0])
+    if constraints.target_school:
+        args["school_name"] = str(constraints.target_school)
+    if constraints.target_subject:
+        args["subject_name"] = str(constraints.target_subject)
+    if tool_name == "build_student_exam_report_data_tool":
+        if not constraints.target_student:
+            return None
+        args["student_id"] = str(constraints.target_student)
+    return {"tool": tool_name, "args": args}
+
+
 async def _run_tool_expert_phase(
     *,
     request: ChatRequest,
@@ -1492,6 +1522,9 @@ async def _run_tool_expert_phase(
         tool_pack=tool_pack,
     )
     agent.stream_callback = _make_forwarder(state, emit)
+    preselected_tool_call = _preselected_report_tool_call(question, constraints)
+    if preselected_tool_call and preselected_tool_call["tool"] not in agent.tool_pack:
+        preselected_tool_call = None
 
     # 与 DataAnalyst 一致：独立广播 start / end / error，并写入 steps 落库
     await _emit_agent_speak(
@@ -1511,6 +1544,7 @@ async def _run_tool_expert_phase(
             sender=UserProxyAgent(),
             sub_task_index=sub_task_index,
             constraints=constraints.to_context() if constraints else {},
+            preselected_tool_call=preselected_tool_call,
         )
     except Exception as e:  # noqa: BLE001
         logger.exception("tool expert run failed")

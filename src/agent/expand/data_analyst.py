@@ -105,13 +105,23 @@ DATA_ANALYST_DESC = """[分析范围约束]
    **禁止**把本校各科里名次较差的直接叫薄弱（全市第7/37仍属前列）。
    **禁止**用本校/本班各科均分互相比较。
    学校：`GROUP BY xx` 后对各科 `AVG FILTER col>0` 做 `RANK()`；班级：`GROUP BY xx,bj`。
+   各科排名前须 `WHERE 均分 IS NOT NULL`（或 `>0`），`ORDER BY 均分 DESC NULLS LAST`，
+   **禁止**空均分校进参赛池（否则 NULL 占前列、分母偏大）。
+   **最终结果一科一行**：列「学科、均分、全市排名、参赛校数」（UNION ALL 亦可）；
+   **禁止**一行宽表（禁止「语文均分/语文排名/数学均分…」并排）。
    **班级横向对比**：列必须是 `bj` 不是 `xx`。禁止 `SELECT xx AS class_name`，
    禁止只 `GROUP BY xx`（会把全校塌成一行）。fetch 无小题时仍走
    `build_subject_diagnosis_sections_tool`，禁止手写 overview 聚合 SQL。
    班级全市排名：`RANK() OVER (ORDER BY 均分 DESC)` + `COUNT(*) OVER()`，
    **禁止** `PARTITION BY bj`，**禁止** `COUNT(DISTINCT bj)`（班名全市重复，不是班级数）。
+   问句点名引领/支撑/发展校时对照池必须 `xxlb LIKE '%该类%'`，禁止只用排除其他校的全市池。
+   六门班级全市排名查询结果须含第1名+目标班前后各3名并标记本班；
+   `terminate` 只写目标班两个口径的名次/总数/均分，不要把附近班整表贴进结论。
+   单科全市班级排名还须洗净其他校（`xxlb NOT LIKE '%其他%'`）和整班不足 10 人，
+   该科有效人数 `>= 3` 才进池，`RANK() OVER (ORDER BY 均分 DESC NULLS LAST)`；
+   查询结果须含第1名+目标班前后各3名并标记本班，禁止外层只留下目标班一行；
+   `terminate` 只写目标班均分与第几/共几班；名次/总数≤25% 称前列，禁止称中上段。
    化学/生物/政治/地理用 `hxzh/swzh/zzzh/dlzh`，禁止 `hx/sw/zz/dl`。
-   目标校/班只在排名完成后再过滤。
    **禁止** `build_class_weak_subject_report_data_tool`。
 
 1. **识别报告类型**（class_overview / grade_comparison / subject_diagnosis /
@@ -123,6 +133,8 @@ DATA_ANALYST_DESC = """[分析范围约束]
 2b. **写含 district / exam_name / line_name / dq 的 WHERE 之前**，必须先调
    `peek_edu_filter_values(exam_hint=...)` 取得本库真实候选；字面量须来自候选或
    `LIKE '%线索%'`。**禁止**把「N月」拼进区县（如 `district='月广陵区'`）。
+   peek 只是探查：**禁止** peek 后直接 `terminate`；必须再 `execute_sql` 拿到真实行，
+   禁止把未执行 SQL 或「—/待查询」占位表写进 `final_answer`。
    `execute_sql` 返回 0 行且触及教育表时：**禁止**断言「未纳入/没数据」；
    必须再 peek（或 DISTINCT）后改写 SQL 重试，同题最多 2 次。
    区县/全市达线查 `tb_score_indicator`，率用 `SUM(reached_count)/SUM(candidates)`，
@@ -142,16 +154,19 @@ DATA_ANALYST_DESC = """[分析范围约束]
    知识点得分率 → `"knowledge_bar"` 或 `"bar"`+`categories`/`values`；
    各科雷达 → `"subject_radar"` 或 `"radar"`；班级对比 → `"class_compare_bar"`。
    **禁止**使用裸 `chart_type` 以外的未支持名称；`bar`/`column`/`line` 已支持别名自动映射。
-5. **报告生成**：
-   - **全班/多次考试综合分析**（含「所有考试」「历次考试」，须已点名班级）→ 调 `build_comprehensive_report_data_tool(class_name=...)`
-     （完整 SQL 由工具自动读取，**禁止**只抄 preview 20 行），再 `terminate`；
+5. **报告生成**：Team 模式中 DataAnalyst 只查数，报告统一由后续 ToolExpert 组装；
+   仅当当前子任务明确指定报告 builder 时才可调用。
+   - **全班/多次考试综合分析**（含「所有考试」「历次考试」，须已点名班级）→
+     先查学生×考试全量明细；由 ToolExpert 调
+     `build_comprehensive_report_data_tool(class_name=...)`，**禁止**复制 preview；
      **禁止**把多场考试塞进 `build_subject_diagnosis_sections_tool`（会把人次累加、无考试对比）；
      **禁止**把「各校/各学校」或「高三1月」当成某个班（如高三(1)班）去做综合报告；
    - **各校/各学校 + 考试分析**（未点名班级）或全市结构化诊断 → 调 `build_diagnostic_report_data_tool(scope_label=全市, render=true)`；
      **禁止** `build_comprehensive_report_data_tool`；**禁止** fetch 小题；
      **禁止** DataAnalyst 直接调 `build_citywide_exam_analysis_report_tool`；
    - **多维聚合/交叉分析** → `aggregate_dimension_tool` / `cross_analyze_tool`；
-   - **单个学生多次考试分析** → 调 `build_student_exam_report_data_tool(student_name=...)`，
+   - **单个学生多次考试分析** → 先查该生及全班历次明细；由 ToolExpert 调
+     `build_student_exam_report_data_tool(student_name=...)`，
      `student_name` 必须与用户指定学生一致，**只为该学生生成一份报告**；
      全班数据由工具自动读取，**禁止**只传 preview 行；
    - **单个学生 + 单次考试「得分情况/成绩」** → **不要**只查总分后 terminate；

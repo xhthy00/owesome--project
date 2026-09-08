@@ -415,6 +415,79 @@ def _score_band_fact_hint() -> str:
     )
 
 
+def _class_rank_pool_hint(question: str, *, mini: bool = False) -> str:
+    """洗净其他校/小班；问句点名校类时对照池必须落在该类。"""
+    from src.agent.education.query_parse import extract_school_type_target
+
+    if mini:
+        wash = (
+            "排名池必须先洗：排除其他校（xxlb NOT LIKE '%其他%'，含中专/职校），"
+            "整班参考人数 HAVING COUNT(*)>=10；"
+        )
+    else:
+        wash = (
+            "排名池必须先洗：排除其他校（xxlb NOT LIKE '%其他%'，含中专/职校），"
+            "排除整班参考人数不足 10 人的小班（先按 xx,bj 计整班人数 HAVING COUNT(*)>=10，再分轨）。"
+        )
+    st = extract_school_type_target(question)
+    if not st:
+        return wash
+    return (
+        wash
+        + f"对照池必须是全市{st}校班级：xxlb LIKE '%{st}%'；"
+        "禁止用全市所有普通高中（只排除其他校）当对照池。"
+    )
+
+
+def _class_city_rank_fact_hint(question: str) -> str:
+    """班级全市六门排名：选考方向一行 + 不区分选考一行。"""
+    from src.agent.education.query_parse import class_city_rank_answer_mode
+
+    mode = class_city_rank_answer_mode(question)
+    locate = "定位目标班必须同时用学校 xx 与班级 bj，禁止只写班级（同名班会串校）。"
+    near = (
+        "查询结果每个口径须带对照班：第1名 + 目标班名次前后各3名（含本班），"
+        "列含学校、班级、全市排名、均分，本班加标记；"
+        "用目标校+班算窗口，禁止外层 WHERE 只留下目标班一行。"
+        "对话结论只写目标班的名次/总数/均分，不要把附近班整表贴进结论。"
+    )
+    wash = _class_rank_pool_hint(question)
+    if mode == "physics":
+        return (
+            "本题是班级全市排名，问句已点名物理类：只排物理类。"
+            "物理类 xkkm LIKE '物%'；班级均分只算该班物理类学生 zf6m；"
+            f"{wash}对照池=洗净后该类参考人数≥3 的班级；GROUP BY xx,bj 后 RANK()/COUNT(*) OVER()；"
+            f"{locate}{near}禁止文理混排。terminate 写明物理类第几/共几班。"
+        )
+    if mode == "history":
+        return (
+            "本题是班级全市排名，问句已点名历史类：只排历史类。"
+            "历史类 xkkm LIKE '史%' OR LIKE '历%'；班级均分只算该班历史类学生 zf6m；"
+            f"{wash}对照池=洗净后该类参考人数≥3 的班级；GROUP BY xx,bj 后 RANK()/COUNT(*) OVER()；"
+            f"{locate}{near}禁止文理混排。terminate 写明历史类第几/共几班。"
+        )
+    if mode == "mixed":
+        return (
+            "本题是班级全市排名，问句要求不区分选考：洗净后的普通高中班按六门均分混排一行即可；"
+            f"{wash}GROUP BY xx,bj 后 RANK()/COUNT(*) OVER()；{locate}{near}"
+            "terminate 必须写明「不区分选考」。"
+        )
+    return (
+        "本题是班级全市六门排名，必须给出两个口径，禁止只报文理混排一个名次。"
+        "**必须一条 SQL 用 UNION ALL 一次返回两个口径**（列含口径：按选考方向 / 不区分选考）；"
+        "禁止拆成两次 execute_sql——查询结果只保留最后一次 SQL，分开查会丢掉选考那一行。"
+        f"{wash}"
+        "（1）按选考方向：先数该班物理类（xkkm LIKE '物%'）与历史类"
+        "（LIKE '史%' OR LIKE '历%'）在籍且 zf6m>0 的人数；不足 3 人的方向丢掉；"
+        "只按人数多的那一类排（两类人数相等且都≥3 则两类都排）；"
+        "该类均分只算该类学生；对照池=洗净后该类参考人数≥3 的班级。"
+        "（2）不区分选考：洗净后的普通高中班按整班六门均分再排一行。"
+        "两口径都用 GROUP BY xx,bj 后 RANK() OVER (ORDER BY 均分 DESC) 与 COUNT(*) OVER()；"
+        f"禁止 PARTITION BY bj，禁止 COUNT(DISTINCT bj)；{locate}{near}"
+        "terminate 两口径都要有目标班名次和班级总数。"
+    )
+
+
 def _subject_strength_fact_hint(class_name: str) -> str:
     """优势/薄弱学科：各科均分全市排名，禁止本校各科互比。"""
     if class_name:
@@ -426,14 +499,28 @@ def _subject_strength_fact_hint(class_name: str) -> str:
             "做 RANK() OVER (ORDER BY 均分 DESC) 与 COUNT(*) OVER()；"
             "禁止 PARTITION BY bj（那是同名班跨校互比）；禁止 COUNT(DISTINCT bj)（班名重复，不是全市班级数）；"
             "化学/生物/政治/地理用 hxzh/swzh/zzzh/dlzh，禁止 hx/sw/zz/dl。"
-            "目标校+班只在排名完成后再 WHERE 过滤。禁止用该班各科均分互相比较，禁止班际报告工具。"
+            "目标校+班只在排名完成后再 WHERE 过滤。"
+            "**最终结果必须一科一行**：列=学科、均分、全市排名、参赛班数（可用 UNION ALL）；"
+            "**禁止**一行宽表（禁止 语文均分/语文排名… 并排多列）。"
+            "禁止用该班各科均分互相比较，禁止班际报告工具。"
         )
     return (
         "本题是优势/薄弱学科：按该校各科均分的**全市学校排名相对位置**判断"
         "（名次/参赛数≤25%=前列/优势，≥50%=靠后/薄弱，中间=中游；"
         "禁止把本校各科里名次较差的直接叫薄弱，例如第7/37仍属前列）。"
         "查 tb_score_overview，xsxz='在籍生'，GROUP BY xx 后对各科 AVG FILTER col>0 做 RANK()；"
-        "外层再滤目标校。禁止用该校各科均分互相比较，禁止班际报告工具。"
+        "各科须先 WHERE 该科均分 IS NOT NULL（或 >0）再 RANK()/COUNT(*) OVER()，"
+        "ORDER BY 均分 DESC NULLS LAST；禁止空均分校进参赛池。"
+        "外层再滤目标校。"
+        "**禁止**先算全市各科均分（无 GROUP BY xx）再 RANK——那是科目互比，"
+        "参赛校数会变成 8/9（科目数），均分也会变成全市均分而非该校均分。"
+        "排名 CTE 必须保留 xx/school_code；外层用 WHERE xx LIKE 滤目标校；"
+        "**禁止**只用 EXISTS(目标校) 却不滤排名行（会漏出全市榜，摘要易误当成该校全第1）。"
+        "**最终结果必须一科一行**：列=学科、均分、全市排名、参赛校数（可用 UNION ALL）；"
+        "**禁止**一行宽表（禁止 语文均分/语文排名/数学均分… 并排多列）。"
+        "若先 UNION 成「一校一科一行」，必须在每个分支内 RANK，或 RANK() OVER (PARTITION BY 学科 ...)；"
+        "**禁止**对多科混合行做无 PARTITION 的整体 RANK（参赛校数会变成 200+）。"
+        "禁止用该校各科均分互相比较，禁止班际报告工具。"
     )
 
 
@@ -489,6 +576,45 @@ _SUBJECT_AVG_COL = {
     "政治": "zzzh",
     "地理": "dlzh",
 }
+_COMPULSORY_SUBJECTS = frozenset({"语文", "数学", "英语"})
+
+
+def _class_subject_city_rank_fact_hint(question: str) -> str:
+    """班级单科全市排名：洗净池 + NULLS LAST，不走六门双行。"""
+    from src.agent.education.orchestrator import _extract_subject
+
+    subject = (_extract_subject(question) or "").strip()
+    col = _SUBJECT_AVG_COL.get(subject, "")
+    if col:
+        col_txt = (
+            f"{subject}用 {col}；AVG({col}) FILTER (WHERE {col} > 0)，"
+            f"HAVING COUNT(*) FILTER (WHERE {col} > 0) >= 3"
+        )
+    else:
+        col_txt = (
+            "单科用对应列 AVG(col) FILTER (WHERE col > 0)，"
+            "HAVING COUNT(*) FILTER (WHERE col > 0) >= 3"
+        )
+    oral = (
+        "面向用户只说在籍生、排除缺考，禁止写未选考。"
+        if subject in _COMPULSORY_SUBJECTS
+        else "面向用户只说在籍生、排除未选考/缺考。"
+    )
+    return (
+        "本题是班级单科全市排名，不是六门总分："
+        "禁止 UNION ALL 文理双行，禁止只报 zf6m。"
+        f"{col_txt}。"
+        f"{_class_rank_pool_hint(question, mini=True)}"
+        "RANK() OVER (ORDER BY 均分 DESC NULLS LAST)，禁止把无分班排第1。"
+        "GROUP BY xx,bj 后 COUNT(*) OVER() 为洗净后班级数；"
+        "用目标校+班定位窗口：第1名 + 目标班名次前后各3名（含本班并加标记），"
+        "xx LIKE '%校名%'（常带 A01 前缀，禁止 xx='扬州中学' 精确等于）且同时用 bj；"
+        "禁止外层 WHERE 只留下目标班一行。"
+        "terminate 只写目标班均分、第几/共几班；名次/总数≤25% 称前列，禁止称中上段。"
+        "对话结论不要罗列附近班。"
+        f"{oral}"
+        "面向用户禁止字段名 yy/rk/avg_yy、禁止校码 A01。"
+    )
 
 
 def _school_vs_school_type_avg_hint(school: str, school_type: str, subject: str) -> str:
@@ -526,6 +652,8 @@ def build_fact_query_plan_items(question: str) -> list[dict[str, str]]:
         extract_district_target,
         extract_school_target,
         extract_school_type_target,
+        is_class_city_rank_query,
+        is_class_subject_city_rank_query,
         is_item_difficulty_curve_query,
         is_line_reach_citywide_scope,
         is_line_reach_query,
@@ -603,8 +731,9 @@ def build_fact_query_plan_items(question: str) -> list[dict[str, str]]:
         scope_bits.append(f"考试【{exam}】")
     scope = "、".join(scope_bits) if scope_bits else "已确认范围"
     bound_lock = ""
-    if any((exam, school, class_name, spec_district)):
-        lock_bits = [b for b in (exam, school, class_name, spec_district) if b]
+    st_lock = f"{school_type}校" if school_type else ""
+    if any((exam, school, class_name, spec_district, st_lock)):
+        lock_bits = [b for b in (exam, school, class_name, spec_district, st_lock) if b]
         bound_lock = (
             "WHERE 字面量必须等于已绑定："
             + "、".join(lock_bits)
@@ -625,14 +754,20 @@ def build_fact_query_plan_items(question: str) -> list[dict[str, str]]:
     school_city_hint = ""
     school_type_avg_hint = ""
     strength_hint = ""
+    class_rank_hint = ""
     if is_subject_strength_query(q):
         strength_hint = _subject_strength_fact_hint(class_name)
+    elif is_class_city_rank_query(q):
+        class_rank_hint = _class_city_rank_fact_hint(q)
+    elif is_class_subject_city_rank_query(q):
+        class_rank_hint = _class_subject_city_rank_fact_hint(q)
     if not line_reach_hint and not score_band_hint and is_school_vs_school_type_avg_query(q):
         school_type_avg_hint = _school_vs_school_type_avg_hint(school, school_type, subject)
     if (
         not line_reach_hint
         and not score_band_hint
         and not school_type_avg_hint
+        and not strength_hint
         and is_school_vs_city_avg_query(q)
     ):
         school_city_hint = _school_vs_city_avg_hint()
@@ -681,6 +816,7 @@ def build_fact_query_plan_items(question: str) -> list[dict[str, str]]:
                 f"{school_city_hint}"
                 f"{overview_hint}"
                 f"{strength_hint}"
+                f"{class_rank_hint}"
                 f"{elective_hint}"
                 f"{enrolled_hint}"
                 f"{bound_lock}"
@@ -689,7 +825,7 @@ def build_fact_query_plan_items(question: str) -> list[dict[str, str]]:
                 "只回答用户所问（如最高分是谁/多少分）；"
                 + (
                     ""
-                    if overview_hint or school_city_hint or school_type_avg_hint or elective_hint or strength_hint
+                    if overview_hint or school_city_hint or school_type_avg_hint or elective_hint or strength_hint or class_rank_hint
                     else (
                         "**禁止**写「参考人数/共N人参考/班级人数」——"
                         "Top-N、LIMIT、返回行数都不是全班人数；"

@@ -211,14 +211,26 @@ body {
   max-height: 76vh;
 }
 .edu-md-table-wrap table {
-  width: max-content;
-  min-width: 100%;
+  display: table;
+  width: 100%;
   margin: 0;
   border-collapse: collapse;
+  table-layout: auto;
   font-size: 13px;
+}
+.edu-md-table-wrap thead {
+  display: table-header-group;
+}
+.edu-md-table-wrap tbody {
+  display: table-row-group;
+}
+.edu-md-table-wrap tr {
+  display: table-row;
 }
 .edu-md-table-wrap th,
 .edu-md-table-wrap td {
+  display: table-cell;
+  box-sizing: border-box;
   border: none;
   border-bottom: 1px solid #e8edf3;
   padding: 11px 14px;

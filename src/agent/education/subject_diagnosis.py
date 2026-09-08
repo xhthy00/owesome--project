@@ -27,6 +27,48 @@ def _fmt(v: Any) -> str:
     return str(v)
 
 
+def _score_segment_upper(label: str) -> float | None:
+    """分数段上界。``90-105`` → 105；``60分以下`` → 60。"""
+    text = str(label or "").strip()
+    if not text:
+        return None
+    cleaned = (
+        text.replace("分", "")
+        .replace("–", "-")
+        .replace("—", "-")
+        .replace("~", "-")
+        .replace("～", "-")
+    )
+    if "以下" in cleaned:
+        return _num(cleaned.split("以下", 1)[0].strip())
+    parts = [p.strip() for p in cleaned.split("-") if p.strip()]
+    if len(parts) >= 2:
+        return _num(parts[-1])
+    return None
+
+
+def _is_low_score_segment(label: str, pass_line: float | None) -> bool:
+    """是否低于及格线的分数段。禁止用「0-」子串，避免 ``90-105`` / ``120-135`` 误伤。"""
+    text = str(label or "")
+    if "低" in text or "不及格" in text:
+        return True
+    hi = _score_segment_upper(text)
+    if hi is None or pass_line is None:
+        return False
+    return hi <= pass_line + 1
+
+
+def _pass_line_from_stats(stats: dict[str, Any] | None) -> float | None:
+    st = stats or {}
+    line = _num(st.get("pass_line"))
+    if line is not None:
+        return line
+    full = _num(st.get("full_score"))
+    if full is None:
+        return None
+    return full * 0.6
+
+
 def _is_html_fragment(value: str) -> bool:
     s = value.strip().lower()
     return s.startswith("<table") or s.startswith("<p ") or s.startswith("<div")
@@ -990,11 +1032,12 @@ def _build_class_kpi_items(stats: dict[str, Any] | None) -> list[dict[str, Any]]
         })
 
     segments = stats.get("segments") or []
+    pass_line = _pass_line_from_stats(stats) or (full * 0.6)
     low_segs = [
         s for s in segments
-        if isinstance(s, dict) and (_num(s.get("ratio")) or 0) >= 15
-        and ("低" in str(s.get("label") or "") or "不及格" in str(s.get("label") or "")
-             or "0-" in str(s.get("label") or "") or "60" in str(s.get("label") or ""))
+        if isinstance(s, dict)
+        and (_num(s.get("ratio")) or 0) >= 15
+        and _is_low_score_segment(str(s.get("label") or ""), pass_line)
     ]
     for s in low_segs[:2]:
         items.append({
@@ -1081,6 +1124,7 @@ def build_class_overview_summary(
     # 分数段：点出占比最高段与低分段
     top_seg = None
     low_segs: list[dict[str, Any]] = []
+    pass_line = _pass_line_from_stats(stats) or (full * 0.6)
     for s in segments:
         if not isinstance(s, dict):
             continue
@@ -1088,13 +1132,7 @@ def build_class_overview_summary(
         label = str(s.get("label") or "")
         if top_seg is None or ratio > (_num(top_seg.get("ratio")) or 0):
             top_seg = s
-        lowish = (
-            "低" in label
-            or "不及格" in label
-            or label.startswith("0-")
-            or (("-" in label) and "60" in label.split("-", 1)[0])
-        )
-        if ratio >= 10 and lowish:
+        if ratio >= 10 and _is_low_score_segment(label, pass_line):
             low_segs.append(s)
     seg_bits: list[str] = []
     if top_seg and (_num(top_seg.get("ratio")) or 0) > 0:

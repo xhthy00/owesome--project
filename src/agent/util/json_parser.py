@@ -21,6 +21,37 @@ _CODE_BLOCK_RE = re.compile(r"```(?:json|JSON)?\s*(.+?)\s*```", re.DOTALL)
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
+class JsonParseError(ValueError):
+    """JSON parse failure with safe structural diagnostics."""
+
+    def __init__(self, raw: str, *, likely_truncated: bool) -> None:
+        self.raw_length = len(raw)
+        self.preview = raw[:200]
+        self.likely_truncated = likely_truncated
+        super().__init__(
+            f"Cannot parse JSON from diagnostic preview "
+            f"(raw_length={self.raw_length}): {self.preview!r}"
+        )
+
+
+def _likely_truncated(raw: str) -> bool:
+    if _repair_truncated(raw) is not None:
+        return True
+    lowered = raw.lower()
+    if "<minimax:tool_call" in lowered and "</minimax:tool_call>" not in lowered:
+        return True
+    if "<invoke" in lowered and "</invoke>" not in lowered:
+        return True
+    if "<tool_call" in lowered and "</tool_call>" not in lowered:
+        return True
+    return False
+
+
+def looks_structurally_truncated(text: str) -> bool:
+    """Return whether JSON/XML delimiters indicate an incomplete model response."""
+    return _likely_truncated(str(text or ""))
+
+
 def _try_parse_one(raw: str) -> Any:
     m = _CODE_BLOCK_RE.search(raw)
     if m:
@@ -125,5 +156,7 @@ def parse_json_tolerant(text: str) -> Any:
         except ValueError:
             continue
 
-    snippet = raw[:200]
-    raise ValueError(f"Cannot parse JSON from: {snippet!r}")
+    raise JsonParseError(raw, likely_truncated=_likely_truncated(raw))
+
+
+__all__ = ["JsonParseError", "looks_structurally_truncated", "parse_json_tolerant"]

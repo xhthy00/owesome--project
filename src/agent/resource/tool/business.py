@@ -12,8 +12,9 @@
 
 from __future__ import annotations
 
-import re
 import json
+import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -1996,17 +1997,40 @@ def execute_sql(
     try:
         from src.agent.education.sql_lint import format_lint_blocks, lint_edu_sql_blocks
 
+        q = str(
+            ctx.get("user_question")
+            or (ctx.get("constraints") or {}).get("user_question")
+            or (ctx.get("constraints") or {}).get("question")
+            or ""
+        )
+        blocks = lint_edu_sql_blocks(
+            sql,
+            bound if isinstance(bound, list) else None,
+            question=q or None,
+        )
+        if blocks:
+            return ToolResult(
+                content=format_lint_blocks(blocks),
+                data={"sql": sql, "error": "sql_lint_blocked", "lint_blocks": blocks},
+            )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("edu sql_lint failed: %s", exc, exc_info=True)
+
+    db_type, config, _ = _load_datasource(datasource_id, workspace_oid)
+    sql, fixes = apply_sql_privacy(sql)
+
+    # 隐私改写后再拦一次，避免改写后才出现同层 RANK+校过滤
+    try:
+        from src.agent.education.sql_lint import format_lint_blocks, lint_edu_sql_blocks
+
         blocks = lint_edu_sql_blocks(sql, bound if isinstance(bound, list) else None)
         if blocks:
             return ToolResult(
                 content=format_lint_blocks(blocks),
                 data={"sql": sql, "error": "sql_lint_blocked", "lint_blocks": blocks},
             )
-    except Exception:
-        pass
-
-    db_type, config, _ = _load_datasource(datasource_id, workspace_oid)
-    sql, fixes = apply_sql_privacy(sql)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("edu sql_lint (post-privacy) failed: %s", exc, exc_info=True)
 
     if user_id is not None:
         success, message, result, sql_run = execute_sql_with_permission_by_user_id(
@@ -2044,6 +2068,111 @@ def execute_sql(
 
     columns = result.get("columns", [])
     rows = result.get("rows", [])
+    try:
+        from src.agent.education.sql_lint import (
+            format_lint_blocks,
+            looks_like_collapsed_city_rank_result,
+            looks_like_cross_subject_mixed_pool,
+            looks_like_running_count_as_school_pool,
+            looks_like_subject_mutual_rank_as_city_schools,
+            looks_like_unfiltered_city_leaderboard,
+        )
+
+        if looks_like_collapsed_city_rank_result(sql_run or sql, columns, rows):
+            msg = (
+                "查询结果像是「同层过滤导致全市排名塌成全第1」："
+                "仅 1 行且多个排名列均为 1。"
+                "必须先对全市做 RANK()，再在外层 WHERE 过滤目标校/班后重试。"
+            )
+            return ToolResult(
+                content=format_lint_blocks([msg]),
+                data={
+                    "sql": sql_run or sql,
+                    "error": "sql_lint_blocked",
+                    "lint_blocks": [msg],
+                },
+            )
+        if looks_like_subject_mutual_rank_as_city_schools(columns, rows):
+            msg = (
+                "查询结果像是「把各科全市均分互相排名」："
+                "参赛校数等于学科行数（常为 8/9），名次 1..N 覆盖全部科目，"
+                "这不是全市学校排名。必须 GROUP BY xx 后按科 RANK()/COUNT(*) OVER()，"
+                "外层再滤目标校后重试。"
+            )
+            return ToolResult(
+                content=format_lint_blocks([msg]),
+                data={
+                    "sql": sql_run or sql,
+                    "error": "sql_lint_blocked",
+                    "lint_blocks": [msg],
+                },
+            )
+        if looks_like_cross_subject_mixed_pool(columns, rows):
+            msg = (
+                "查询结果像是「各科 UNION 后跨科混池排名」："
+                "参赛校数≈学科数×学校数（常为 200+），不是单科全市校排。"
+                "必须按科分别 RANK()/COUNT(*) OVER()（或 PARTITION BY 学科）后重试。"
+            )
+            return ToolResult(
+                content=format_lint_blocks([msg]),
+                data={
+                    "sql": sql_run or sql,
+                    "error": "sql_lint_blocked",
+                    "lint_blocks": [msg],
+                },
+            )
+        if looks_like_running_count_as_school_pool(columns, rows):
+            msg = (
+                "查询结果像是「COUNT(*) OVER (ORDER BY…) 累计数冒充参赛校数」："
+                "多数行参赛校数≈全市排名（如 2/2、7/7）。"
+                "参赛校数须用 COUNT(*) OVER () 后重试。"
+            )
+            return ToolResult(
+                content=format_lint_blocks([msg]),
+                data={
+                    "sql": sql_run or sql,
+                    "error": "sql_lint_blocked",
+                    "lint_blocks": [msg],
+                },
+            )
+        if looks_like_unfiltered_city_leaderboard(sql_run or sql, columns, rows):
+            msg = (
+                "查询结果像是「全市学校榜未滤到目标校」："
+                "行数远超单校学科数，且名次从第1排到很后。"
+                "禁止只用 EXISTS 判断目标校是否存在；"
+                "排名 CTE 须保留 xx，外层 WHERE xx/school_code 过滤后再展示。"
+            )
+            return ToolResult(
+                content=format_lint_blocks([msg]),
+                data={
+                    "sql": sql_run or sql,
+                    "error": "sql_lint_blocked",
+                    "lint_blocks": [msg],
+                },
+            )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "collapsed city-rank guard failed: %s", exc, exc_info=True
+        )
+    try:
+        from src.agent.education.summary_context import (
+            try_unpivot_wide_subject_rank_table,
+        )
+
+        unpivoted = try_unpivot_wide_subject_rank_table(columns, rows)
+        if unpivoted is not None:
+            columns, rows = unpivoted
+            result = {
+                **result,
+                "columns": columns,
+                "rows": rows,
+                "row_count": len(rows),
+                "unpivoted_subject_rank": True,
+            }
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "wide subject-rank unpivot failed: %s", exc, exc_info=True
+        )
     preview = _format_rows_as_markdown(columns, rows, EXECUTE_SQL_PREVIEW_ROWS)
     fix_hint = format_auto_fix_note(fixes, success=True) if fixes else ""
     row_count = len(rows)
@@ -2216,7 +2345,24 @@ def build_default_toolpack(
     tools: list[Any] = list(default_business_tools())
     if include_terminate:
         tools.append(TerminateTool())
-    pack = ToolPack(tools=tools)
+    heavy_report_args = {
+        "records",
+        "rows",
+        "columns",
+        "exec_result",
+        "score_rows",
+        "fetch_data",
+        "item_rows",
+        "knowledge_rows",
+        "report_data",
+        "tool_runtime_ctx",
+    }
+    pack = ToolPack(tools=tools).hide_parameters(
+        {
+            "build_comprehensive_report_data_tool": heavy_report_args,
+            "build_student_exam_report_data_tool": heavy_report_args,
+        }
+    )
 
     bindings: dict[str, Any] = {}
     if datasource_id is not None:

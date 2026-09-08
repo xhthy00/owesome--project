@@ -114,6 +114,9 @@ def test_unparsable_json_returns_fail(pack, audit_spy):
     out = _run(action.run("definitely not json"))
     assert out.is_exe_success is False
     assert "JSON" in out.content
+    assert out.extra["failure_code"] == "parse_error"
+    assert out.extra["raw_length"] == len("definitely not json")
+    assert "综合/学生报告" not in out.content
     assert len(audit_spy) == 1
     assert audit_spy[0]["tool_name"] == "tool_call"
     assert audit_spy[0]["success"] is False
@@ -184,6 +187,66 @@ def test_minimax_multi_invoke_keeps_first_tool():
     assert parsed["tool"] == "peek_edu_filter_values"
     assert parsed["args"]["exam_hint"] == "2026届高三1月期末"
     assert parsed["args"]["table"] == "tb_score_overview"
+
+
+def test_minimax_tool_node_xml_is_parsed_and_invoked(pack):
+    """兼容会话 697 实测的 tool_call/tool 节点方言。"""
+    action = ToolAction(tool_pack=pack)
+    ai_msg = (
+        "<think>先探查表</think>"
+        "<minimax:tool_call><tool_call>"
+        '<tool name="describe_table">'
+        '<parameter name="table_name">tb_score_overview</parameter>'
+        "</tool></tool_call></minimax:tool_call>"
+    )
+
+    out = _run(action.run(ai_msg))
+
+    assert out.is_exe_success is True
+    assert out.action == "describe_table"
+    assert out.observations == "describe:tb_score_overview"
+
+
+def test_minimax_parameter_values_decode_json_types():
+    from src.agent.core.action.tool_action import _parse_minimax_tool_call
+
+    parsed = _parse_minimax_tool_call(
+        '<minimax:tool_call><invoke name="build">'
+        '<parameter name="render">true</parameter>'
+        '<parameter name="rows">[1, 2]</parameter>'
+        '<parameter name="label">期末</parameter>'
+        "</invoke></minimax:tool_call>"
+    )
+
+    assert parsed == {
+        "tool": "build",
+        "args": {"render": True, "rows": [1, 2], "label": "期末"},
+    }
+
+
+def test_incomplete_minimax_tool_name_is_not_invoked(pack):
+    action = ToolAction(tool_pack=pack)
+    out = _run(
+        action.run(
+            '<minimax:tool_call><tool_call><tool name="describe_tab',
+        )
+    )
+
+    assert out.is_exe_success is False
+    assert out.action == "tool_call"
+    assert out.extra["failure_code"] == "truncated_output"
+
+
+def test_truncated_json_is_not_repaired_and_executed_by_tool_action(pack):
+    action = ToolAction(tool_pack=pack)
+    out = _run(
+        action.run(
+            '{"tool":"execute_sql","args":{"sql":"SELECT * FROM users WHERE',
+        )
+    )
+
+    assert out.is_exe_success is False
+    assert out.extra["failure_code"] == "truncated_output"
 
 
 def test_minimax_tool_xml_is_not_treated_as_final_answer(pack):
@@ -299,6 +362,7 @@ def test_unknown_tool_returns_fail_with_available_list(pack):
     assert out.is_exe_success is False
     assert "nope" in out.content
     assert "add" in out.content
+    assert out.extra["failure_code"] == "unknown_tool"
 
 
 def test_bad_args_type_returns_fail(pack):
@@ -306,6 +370,7 @@ def test_bad_args_type_returns_fail(pack):
     out = _run(action.run('{"tool": "add", "args": "not a dict"}'))
     assert out.is_exe_success is False
     assert "args" in out.content
+    assert out.extra["failure_code"] == "argument_error"
 
 
 def test_tool_raises_is_caught(pack):
@@ -313,6 +378,7 @@ def test_tool_raises_is_caught(pack):
     out = _run(action.run('{"tool": "boom", "args": {}}'))
     assert out.is_exe_success is False
     assert "kaboom" in out.content
+    assert out.extra["failure_code"] == "execution_error"
 
 
 def test_action_reads_alternative_field_names(pack):

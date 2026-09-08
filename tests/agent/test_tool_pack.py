@@ -114,3 +114,16 @@ def test_render_prompt_tool_with_all_bound_params_shows_only_name():
     assert "full_bound:" in text
     assert "a(" not in text
     assert "b(" not in text
+
+
+def test_hidden_parameters_remain_callable_but_are_not_model_visible():
+    pack = ToolPack(tools=[use_session]).hide_parameters(
+        {"use_session": {"session"}}
+    )
+
+    text = pack.render_prompt()
+    result = _run(pack.invoke("use_session", {"session": "runtime", "key": "k"}))
+
+    assert "session(" not in text
+    assert "key(" in text
+    assert result.data == "runtime:k"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.agent.util.json_parser import parse_json_tolerant
+from src.agent.util.json_parser import JsonParseError, parse_json_tolerant
 
 
 def test_plain_object():
@@ -95,3 +95,15 @@ def test_repair_does_not_hijack_non_json_text():
     """没有括号的纯文本仍应抛错，不能被修复逻辑吞掉。"""
     with pytest.raises(ValueError):
         parse_json_tolerant("我需要先查看成绩表结构，然后编写SQL查询。")
+
+
+def test_parse_error_distinguishes_preview_from_raw_and_detects_truncation():
+    raw = "<minimax:tool_call>" + "x" * 300
+    with pytest.raises(JsonParseError) as caught:
+        parse_json_tolerant(raw)
+
+    error = caught.value
+    assert error.raw_length == len(raw)
+    assert len(error.preview) == 200
+    assert error.likely_truncated is True
+    assert "diagnostic preview" in str(error)

@@ -738,8 +738,8 @@ disable-model-invocation: true
 
 ### Agent 执行步骤
 
-1. 多场明细查询 → 规范为 records / 长表。
-2. `build_comprehensive_report_data_tool(records=..., exam_order=[...专名...], class_name=..., render=true)`  
+1. DataAnalyst 查询学生×考试全量明细，由运行时作为上游数据注入。
+2. ToolExpert 仅调用 `build_comprehensive_report_data_tool(exam_order=[...专名...], class_name=..., render=true)`；禁止手填 `records/rows/columns`。
    - `exam_order` 用专名列表。
 3. 模板：`education/comprehensive.html`
 4. `terminate`

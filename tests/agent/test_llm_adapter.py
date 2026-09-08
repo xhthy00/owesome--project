@@ -161,6 +161,24 @@ def test_adapter_normalizes_legacy_function_call():
     assert out == {"tool": "execute_sql", "args": {"sql": "SELECT 1"}}
 
 
+def test_adapter_normalizes_minimax_xml_content():
+    xml = (
+        "<think>先看表结构</think>"
+        "<minimax:tool_call>"
+        '<invoke name="describe_table">'
+        '<parameter name="table_name">tb_score_overview</parameter>'
+        "</invoke></minimax:tool_call>"
+    )
+    client = LangChainLlmClient(llm=FakeChatModel(reply=xml))
+
+    out = json.loads(_run(client.chat([{"role": "user", "content": "x"}])))
+
+    assert out == {
+        "tool": "describe_table",
+        "args": {"table_name": "tb_score_overview"},
+    }
+
+
 def test_adapter_returns_plain_text_when_no_tool_call():
     model = FakeChatModel(reply='{"tool": "terminate", "args": {}}')
     client = LangChainLlmClient(llm=model)

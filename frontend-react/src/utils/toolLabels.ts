@@ -1099,11 +1099,24 @@ export function stripTechnicalSql(text: string): string {
     .trim();
 }
 
+/** 结论里已有表时，去掉文末重复的「### 查询结果」附表 */
+export function stripRedundantQueryResultSection(text: string): string {
+  const t = (text || "").replace(/\r\n/g, "\n");
+  const marker = /(?:^|\n)#{1,3}\s*查询结果\s*(?:\n|$)/;
+  const found = marker.exec(t);
+  if (!found) return t.trim();
+  const before = t.slice(0, found.index);
+  if (!/^\s*\|.+\|\s*$/m.test(before)) return t.trim();
+  return before.replace(/\n{3,}/g, "\n\n").trim();
+}
+
 /** 左侧气泡只展示给人看的结论，过滤 SQL / think / 执行完成等过程垃圾 */
 export function pickCustomerAnswer(summary?: string, assistantContent?: string): string {
   const fromSummary = (summary || "").trim();
   if (fromSummary) {
-    return normalizeAssistantMarkdown(stripTechnicalSql(splitThinkContent(fromSummary).plain));
+    return stripRedundantQueryResultSection(
+      normalizeAssistantMarkdown(stripTechnicalSql(splitThinkContent(fromSummary).plain))
+    );
   }
   const raw = (assistantContent || "").trim();
   if (!raw) return "";
@@ -1116,7 +1129,7 @@ export function pickCustomerAnswer(summary?: string, assistantContent?: string):
   if (/^思考[：:]/.test(cleaned)) return "";
   if (/^\s*SELECT\b/i.test(cleaned)) return "";
   if (/返回\s*\d+\s*行结果/.test(cleaned) && /SELECT\b/i.test(cleaned)) return "";
-  return normalizeAssistantMarkdown(cleaned);
+  return stripRedundantQueryResultSection(normalizeAssistantMarkdown(cleaned));
 }
 
 export function extractThinkFromText(raw?: string): string {
