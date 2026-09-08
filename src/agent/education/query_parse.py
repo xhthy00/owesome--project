@@ -483,11 +483,21 @@ def is_individual_student_analysis_query(question: str) -> bool:
 
 
 # 可选吃掉「3月」，避免「3月广陵区」抽成「月广陵区」；区名本身不以「月」开头
+# 「地区」的「区」不是行政区后缀，用 (?<!地)区 排除
 _DISTRICT_RE = re.compile(
-    r"(?:[0-9]{1,2}月)?((?!月)[\u4e00-\u9fff]{2,6}(?:区|县))"
+    r"(?:[0-9]{1,2}月)?((?!月)[\u4e00-\u9fff]{2,6}(?:(?<!地)区|县))"
+)
+#: 扬州口语「宝应地区」；白名单避免「期末宝应地区」吞进考试名
+_KNOWN_DISTRICT_STEMS = ("广陵", "邗江", "江都", "仪征", "高邮", "宝应", "市直")
+_DISTRICT_AREA_RE = re.compile(
+    r"(?:[0-9]{1,2}月)?(" + "|".join(_KNOWN_DISTRICT_STEMS) + r")地区"
 )
 _DISTRICT_BARE_RE = re.compile(
     r"(?:[0-9]{1,2}月)?([\u4e00-\u9fff]{2,3})(?=本科线|特控线|上线)"
+)
+#: 「宝应本科达线率」省略区；仅白名单，避免「期末本科达线率」抽成期末区
+_DISTRICT_BARE_REACH_RE = re.compile(
+    r"(?:[0-9]{1,2}月)?(" + "|".join(_KNOWN_DISTRICT_STEMS) + r")(?=本科达线|达线率)"
 )
 _DISTRICT_BARE_REJECT = frozenset(
     {
@@ -504,19 +514,30 @@ _DISTRICT_BARE_REJECT = frozenset(
         "体育",
         "美术",
         "音乐",
+        "物理",
+        "历史",
+        "物理类",
+        "历史类",
     }
 )
+_GENERIC_DISTRICT_LABELS = frozenset({"各区", "各县", "各区县", "全区县", "各地区"})
 
 
 def extract_district_target(question: str) -> str | None:
-    """从问题中抽取区县名（如「鼓楼区」）。"""
+    """从问题中抽取区县名（如「鼓楼区」「宝应地区」）。"""
     q = (question or "").strip()
     if not q:
         return None
+    m = _DISTRICT_AREA_RE.search(q)
+    if m:
+        return m.group(1)
     m = _DISTRICT_RE.search(q)
     if m:
         return m.group(1)
-    # 「3月广陵本科线」口语省略「区」；不用「达线」以免「班南大达线」误抽
+    # 「3月广陵本科线」口语省略「区」；光杆「达线」不抽，以免「班南大达线」误伤
+    m = _DISTRICT_BARE_REACH_RE.search(q)
+    if m:
+        return m.group(1) + "区"
     m = _DISTRICT_BARE_RE.search(q)
     if not m:
         return None
@@ -524,6 +545,14 @@ def extract_district_target(question: str) -> str | None:
     if bare in _DISTRICT_BARE_REJECT or "班" in bare:
         return None
     return bare + "区"
+
+
+def is_named_district_scope(question: str) -> bool:
+    """问句点名具体区县，不是「各区」对比。"""
+    dist = extract_district_target(question)
+    if not dist or dist in _GENERIC_DISTRICT_LABELS:
+        return False
+    return not dist.startswith("各")
 
 
 _CITYWIDE_MARKERS = ("全市", "全域", "市域", "全区县", "各区县")
@@ -618,6 +647,7 @@ _RANK_HINTS = (
     "排第",
     "第几名",
     "第一名",
+    "第1名",
     "班级第一",
     "年级第一",
     "全校第一",
@@ -626,6 +656,20 @@ _RANK_HINTS = (
 )
 _ORDINAL_ITEM_RE = re.compile(r"第\s*[一二三四五六七八九十百\d]+\s*(?:小题|题)")
 _TOP_PERSON_RE = re.compile(r"第一\s*(?:是谁|的(?:学生|同学)|$)")
+#: 「班级第一 / 哪个班最好」口语，不含「第一次」「第一中学」
+_RANK_ORDINAL_RE = re.compile(
+    r"(?:班级|年级|全校|全市|全年级|校内|班内).{0,6}第[一二三四五六七八九十0-9]+"
+    r"|第[一二三四五六七八九十0-9]+名"
+    r"|(?:哪个|哪一个|哪)(?:班级|班).{0,12}(?:第[一二三四五六七八九十0-9]|最高|最好|第一)"
+    r"|(?:第[一二三四五六七八九十0-9]|最高|最好|第一).{0,12}(?:哪个|哪一个|哪)(?:班级|班)"
+)
+_WHICH_CLASS_LOOKUP_RE = re.compile(
+    r"(?:哪个|哪一个|哪|什么)(?:班级|班)"
+    r"|班级第[一二三四五六七八九十0-9]+"
+    # 「倒数第二的班级 / 第二的班级」——班级是要找的答案，不是已知范围。
+    # LLM 抽槽常把「是哪个班级」改写掉，只剩「第N的班级」，须仍判为 which-class。
+    r"|(?:倒数)?第[一二三四五六七八九十0-9]+(?:名|位)?的(?:班级|班)"
+)
 
 
 def is_rank_query(question: str) -> bool:
@@ -637,7 +681,75 @@ def is_rank_query(question: str) -> bool:
         return False
     # “第一小题”是题号，不是名次；先移除题号片段再匹配“第一”等排名表达。
     q = _ORDINAL_ITEM_RE.sub("", q)
-    return any(h in q for h in _RANK_HINTS) or bool(_TOP_PERSON_RE.search(q))
+    if any(h in q for h in _RANK_HINTS):
+        return True
+    if _TOP_PERSON_RE.search(q):
+        return True
+    return bool(_RANK_ORDINAL_RE.search(q))
+
+
+def is_which_class_lookup_query(question: str) -> bool:
+    """班级是要找的答案（哪个班第一），不是已知筛选范围。"""
+    q = (question or "").strip()
+    if not q:
+        return False
+    if extract_class_target(q) or has_class_alias(q):
+        return False
+    return bool(_WHICH_CLASS_LOOKUP_RE.search(q))
+
+
+_ASKED_RANK_NUM = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
+
+
+def extract_asked_class_rank(question: str) -> tuple[str, int] | None:
+    """问句要的名次：('nth', 2) 全市第2；('from_end', 2) 倒数第2。"""
+    q = (question or "").strip()
+    if not q:
+        return None
+
+    def _n(raw: str) -> int | None:
+        t = str(raw or "").strip()
+        if t.isdigit():
+            v = int(t)
+            return v if v >= 1 else None
+        return _ASKED_RANK_NUM.get(t)
+
+    m = re.search(r"倒数第([一二三四五六七八九十]|[0-9]+)", q)
+    if m:
+        n = _n(m.group(1))
+        return ("from_end", n) if n else None
+    if any(h in q for h in ("倒数第一", "最后一名", "垫底")):
+        return ("from_end", 1)
+    if "倒数第二" in q:
+        return ("from_end", 2)
+    m = re.search(r"第([一二三四五六七八九十]|[0-9]+)(?:名|位)?", q)
+    if m:
+        n = _n(m.group(1))
+        return ("nth", n) if n else None
+    if "第一" in q:
+        return ("nth", 1)
+    return None
+
+
+def is_citywide_nth_class_lookup_query(question: str) -> bool:
+    """全市第N/倒数第N是哪个班（没有已点名的目标班）。"""
+    q = (question or "").strip()
+    if not q or not is_which_class_lookup_query(q) or not is_rank_query(q):
+        return False
+    if not any(m in q for m in ("全市", "全域", "市域")):
+        return False
+    return extract_asked_class_rank(q) is not None
 
 
 _TRACK_STRIP_FOR_CLASS_RANK = re.compile(r"物理类|物理方向|历史类|历史方向|理科|文科")
@@ -647,6 +759,8 @@ def is_class_city_rank_query(question: str) -> bool:
     """点名班级的全市六门/总分排名（非单科、非优势薄弱）。"""
     q = (question or "").strip()
     if not q or not is_rank_query(q):
+        return False
+    if is_which_class_lookup_query(q):
         return False
     if "班" not in q:
         return False
@@ -670,6 +784,8 @@ def is_class_subject_city_rank_query(question: str) -> bool:
     if not any(m in q for m in ("全市", "全域", "市域")):
         return False
     if is_subject_strength_query(q):
+        return False
+    if is_which_class_lookup_query(q):
         return False
     if is_class_city_rank_query(q):
         return False
@@ -2707,6 +2823,7 @@ def report_matches_student(title: str, html: str, target: str) -> bool:
 __all__ = [
     "build_edu_aware_constraints",
     "extract_district_target",
+    "is_named_district_scope",
     "extract_exam_name_hint",
     "extract_school_target",
     "peel_rhetorical_school_suffix",
@@ -2728,6 +2845,9 @@ __all__ = [
     "is_line_reach_query",
     "is_score_stat_query",
     "is_rank_query",
+    "is_which_class_lookup_query",
+    "extract_asked_class_rank",
+    "is_citywide_nth_class_lookup_query",
     "is_class_city_rank_query",
     "is_class_subject_city_rank_query",
     "class_city_rank_answer_mode",

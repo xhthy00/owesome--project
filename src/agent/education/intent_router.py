@@ -337,6 +337,16 @@ def _is_score_stat_fact(question: str) -> bool:
     return not _has_explicit_report_intent(q)
 
 
+def _is_rank_fact(question: str) -> bool:
+    """单场排名/第几/哪个班第一，未点名报告时走事实查询。"""
+    from src.agent.education.query_parse import is_rank_query
+
+    q = question or ""
+    if not is_rank_query(q):
+        return False
+    return not _has_explicit_report_intent(q)
+
+
 def _is_subject_strength_fact(question: str) -> bool:
     """优势/薄弱学科按各科均分全市排名，不是本校各科互比、不是班际报告。"""
     from src.agent.education.query_parse import is_subject_strength_query
@@ -422,6 +432,8 @@ def _candidate_pool(question: str) -> list[ReportType]:
     if _is_score_stat_fact(q):
         return []
     if _is_subject_strength_fact(q):
+        return []
+    if _is_rank_fact(q):
         return []
     if is_school_vs_city_avg_query(q):
         return []
@@ -706,6 +718,14 @@ def fallback_classify_report_intent(question: str) -> ReportRoute:
             report_type=None,
             confidence=0.95,
             reason="优势/薄弱学科按各科均分全市排名",
+            source="hard",
+        )
+    if _is_rank_fact(q):
+        return ReportRoute(
+            needs_report=False,
+            report_type=None,
+            confidence=0.95,
+            reason="单场排名/第几走事实查询",
             source="hard",
         )
 
@@ -1056,6 +1076,14 @@ def _hard_route(question: str) -> ReportRoute | None:
             report_type=None,
             confidence=0.95,
             reason="优势/薄弱学科按各科均分全市排名",
+            source="hard",
+        )
+    if _is_rank_fact(q):
+        return ReportRoute(
+            needs_report=False,
+            report_type=None,
+            confidence=0.95,
+            reason="单场排名/第几走事实查询",
             source="hard",
         )
     if is_knowledge_cohort_gap_query(q):

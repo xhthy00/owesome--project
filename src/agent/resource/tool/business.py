@@ -1994,15 +1994,15 @@ def execute_sql(
 
     ctx = tool_runtime_ctx if isinstance(tool_runtime_ctx, dict) else {}
     bound = ctx.get("bound_literals") or []
+    q = str(
+        ctx.get("user_question")
+        or (ctx.get("constraints") or {}).get("user_question")
+        or (ctx.get("constraints") or {}).get("question")
+        or ""
+    )
     try:
         from src.agent.education.sql_lint import format_lint_blocks, lint_edu_sql_blocks
 
-        q = str(
-            ctx.get("user_question")
-            or (ctx.get("constraints") or {}).get("user_question")
-            or (ctx.get("constraints") or {}).get("question")
-            or ""
-        )
         blocks = lint_edu_sql_blocks(
             sql,
             bound if isinstance(bound, list) else None,
@@ -2023,7 +2023,9 @@ def execute_sql(
     try:
         from src.agent.education.sql_lint import format_lint_blocks, lint_edu_sql_blocks
 
-        blocks = lint_edu_sql_blocks(sql, bound if isinstance(bound, list) else None)
+        blocks = lint_edu_sql_blocks(
+            sql, bound if isinstance(bound, list) else None, question=q or None
+        )
         if blocks:
             return ToolResult(
                 content=format_lint_blocks(blocks),
@@ -2073,6 +2075,8 @@ def execute_sql(
             format_lint_blocks,
             looks_like_collapsed_city_rank_result,
             looks_like_cross_subject_mixed_pool,
+            looks_like_nth_class_lookup_homeroom_pool,
+            looks_like_nth_class_lookup_wrong_rank,
             looks_like_running_count_as_school_pool,
             looks_like_subject_mutual_rank_as_city_schools,
             looks_like_unfiltered_city_leaderboard,
@@ -2141,6 +2145,34 @@ def execute_sql(
                 "行数远超单校学科数，且名次从第1排到很后。"
                 "禁止只用 EXISTS 判断目标校是否存在；"
                 "排名 CTE 须保留 xx，外层 WHERE xx/school_code 过滤后再展示。"
+            )
+            return ToolResult(
+                content=format_lint_blocks([msg]),
+                data={
+                    "sql": sql_run or sql,
+                    "error": "sql_lint_blocked",
+                    "lint_blocks": [msg],
+                },
+            )
+        if looks_like_nth_class_lookup_homeroom_pool(columns, rows, q or None):
+            msg = (
+                "查询结果像是「再选科目把行政班洗净数当成参赛班数」："
+                "化学/生物/政治/地理的参赛班数不应接近全员行政班（约 300+）。"
+                "必须在该科 HAVING FILTER col>0 >= 3 之后再 RANK()/COUNT(*) OVER() 后重试。"
+            )
+            return ToolResult(
+                content=format_lint_blocks([msg]),
+                data={
+                    "sql": sql_run or sql,
+                    "error": "sql_lint_blocked",
+                    "lint_blocks": [msg],
+                },
+            )
+        if looks_like_nth_class_lookup_wrong_rank(columns, rows, q or None):
+            msg = (
+                "查询结果像是「全市第N是哪个班却没有第N名那一行」："
+                "结果名次不是用户要的名次，或夹带了对照窗口里的其他班。"
+                "外层须 WHERE 排名=N，只返回该名次行后重试。"
             )
             return ToolResult(
                 content=format_lint_blocks([msg]),

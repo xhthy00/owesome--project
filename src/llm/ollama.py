@@ -23,6 +23,8 @@ class OllamaLLM:
         base_url: Optional[str] = None,
         temperature: float = 0,
         timeout: int = 300,
+        max_tokens: Optional[int] = None,
+        thinking: Optional[str] = None,
         **kwargs
     ):
         self.model = model or "qwen2.5"
@@ -30,16 +32,23 @@ class OllamaLLM:
         self.base_url = base_url or settings.llm_base_url or "http://localhost:11434"
         self.temperature = temperature
         self.timeout = timeout
+        self.max_tokens = max_tokens if max_tokens is not None else settings.llm_max_tokens
+        self.thinking = thinking if thinking is not None else settings.llm_thinking
         self.extra_params = kwargs
 
         # Create LangChain chat model using OpenAI client (Ollama compatible)
+        llm_kwargs = dict(kwargs)
+        if isinstance(self.max_tokens, int) and self.max_tokens > 0:
+            llm_kwargs["max_tokens"] = self.max_tokens
+        if self.thinking in ("disabled", "adaptive"):
+            llm_kwargs["extra_body"] = {"thinking": {"type": self.thinking}}
         self._llm = ChatOpenAI(
             model=self.model,
             api_key="ollama",  # Ollama doesn't require API key
             base_url=f"{self.base_url.rstrip('/')}/v1",
             temperature=self.temperature,
             timeout=self.timeout,
-            **kwargs
+            **llm_kwargs
         )
 
     def chat(self, messages: List, **kwargs) -> str:

@@ -769,6 +769,13 @@ def lint_edu_sql_blocks(
             "班级全市排名查询结果须含对照班：第1名 + 目标班名次前后各3名（标记本班）。"
             "用目标校+班定位窗口（BETWEEN），禁止外层 WHERE 只留下目标班一行。"
         )
+    if _nth_class_lookup_missing_asked_rank(s, question):
+        blocks.append(
+            "全市第N是哪个班须外层 WHERE 排名=N（并列则多行）；"
+            "倒数第K须 RANK DESC（第1=最好）后 WHERE 排名=参赛班数-K+1。"
+            "禁止 BETWEEN 对照窗口，禁止 ORDER BY 均分 ASC（会把正数第K当成倒数），"
+            "禁止输出全市榜，禁止外层 WHERE 已知校+班。"
+        )
     if _class_rank_outer_bj_without_school(s):
         blocks.append(
             "班级全市排名外层必须同时过滤学校（xx/学校）与班级（bj/班级），"
@@ -896,13 +903,32 @@ def _is_subject_class_city_rank_sql(sql: str) -> bool:
     return bool(_SUBJECT_RANK_COL.search(s))
 
 
+def _class_rank_sql_kind(sql: str, question: str | None) -> str:
+    """点名班排或全市第N找班：zf6m / subject / 空。"""
+    try:
+        from src.agent.education.query_parse import (
+            class_city_rank_answer_mode,
+            is_citywide_nth_class_lookup_query,
+            is_class_subject_city_rank_query,
+        )
+    except Exception:
+        return ""
+    q = question or ""
+    if class_city_rank_answer_mode(q) and _is_zf6m_class_city_rank_sql(sql):
+        return "zf6m"
+    if is_class_subject_city_rank_query(q) and _is_subject_class_city_rank_sql(sql):
+        return "subject"
+    if is_citywide_nth_class_lookup_query(q):
+        if _is_subject_class_city_rank_sql(sql):
+            return "subject"
+        if _is_zf6m_class_city_rank_sql(sql):
+            return "zf6m"
+    return ""
+
+
 def _subject_class_rank_keeps_empty_avg(sql: str, question: str | None) -> bool:
     """单科班级排名未排除无分班，DESC 默认 NULLS FIRST 会把缺考班排第1。"""
-    try:
-        from src.agent.education.query_parse import is_class_subject_city_rank_query
-    except Exception:
-        return False
-    if not is_class_subject_city_rank_query(question or ""):
+    if _class_rank_sql_kind(sql, question) != "subject":
         return False
     if not _is_subject_class_city_rank_sql(sql):
         return False
@@ -975,45 +1001,30 @@ def _class_rank_missing_school_type_filter(sql: str, question: str | None) -> bo
 
 def _class_rank_pool_unwashed(sql: str, question: str | None) -> bool:
     """班级全市排名未排除其他校/整班不足 10 人。"""
-    try:
-        from src.agent.education.query_parse import (
-            class_city_rank_answer_mode,
-            is_class_subject_city_rank_query,
-        )
-    except Exception:
-        return False
-    q = question or ""
-    if class_city_rank_answer_mode(q):
-        if not _is_zf6m_class_city_rank_sql(sql):
-            return False
-    elif is_class_subject_city_rank_query(q):
-        if not _is_subject_class_city_rank_sql(sql):
-            return False
-    else:
+    if not _class_rank_sql_kind(sql, question):
         return False
     s = sql or ""
     has_other = bool(re.search(r"xxlb[^\n;]{0,80}其他", s, re.I))
-    has_min10 = bool(re.search(r"HAVING\s+COUNT\s*\([^)]*\)\s*>=\s*10", s, re.I))
+    has_min10 = bool(
+        re.search(
+            r"HAVING[\s\S]{0,240}COUNT\s*\([^)]*\)(?:\s*FILTER\s*\([^)]*\))?\s*>=\s*10",
+            s,
+            re.I,
+        )
+    )
     return not (has_other and has_min10)
 
 
 def _class_rank_outer_target_without_neighborhood(sql: str, question: str | None) -> bool:
     """目标班过滤后没有名次窗口 → 摘要只剩一行，看不到前后对照。"""
     try:
-        from src.agent.education.query_parse import (
-            class_city_rank_answer_mode,
-            is_class_subject_city_rank_query,
-        )
+        from src.agent.education.query_parse import is_citywide_nth_class_lookup_query
     except Exception:
         return False
     q = question or ""
-    if class_city_rank_answer_mode(q):
-        if not _is_zf6m_class_city_rank_sql(sql):
-            return False
-    elif is_class_subject_city_rank_query(q):
-        if not _is_subject_class_city_rank_sql(sql):
-            return False
-    else:
+    if is_citywide_nth_class_lookup_query(q):
+        return False
+    if not _class_rank_sql_kind(sql, q):
         return False
     s = sql or ""
     if re.search(r"\bBETWEEN\b", s, re.I):
@@ -1035,6 +1046,182 @@ def _class_rank_outer_bj_without_school(sql: str) -> bool:
     has_bj = bool(re.search(r"\b(?:bj|班级)\s*(?:=|LIKE)\s*", s, re.I))
     has_xx = bool(re.search(r"\b(?:xx|学校)\s*(?:=|LIKE)\s*", s, re.I))
     return has_bj and not has_xx
+
+
+_RANK_EQ_LEFT = (
+    r"(?:[\w.]+\.)?(?:rk|rnk|city_rank|class_rank|rank_no|排名|名次|全市排名|pos|rank)"
+)
+
+
+def _sql_filters_rank_eq(sql: str, n: int) -> bool:
+    s = sql or ""
+    return bool(re.search(rf"{_RANK_EQ_LEFT}\s*=\s*{n}\b", s, re.I))
+
+
+def _rank_window_is_asc(sql: str) -> bool:
+    """RANK() OVER (ORDER BY … ASC) 会让高分班拿到大号名次。"""
+    s = re.sub(r"FILTER\s*\(\s*WHERE[^)]*\)", " ", sql or "", flags=re.I)
+    return bool(
+        re.search(
+            r"\b(?:RANK|DENSE_RANK|ROW_NUMBER)\s*\(\s*\)\s*OVER\s*\("
+            r"[^)]*ORDER\s+BY[\s\S]{0,80}\bASC\b",
+            s,
+            re.I,
+        )
+    )
+
+
+def _sql_filters_from_end_rank(sql: str, k: int) -> bool:
+    """DESC 排名下倒数第K：排名 = 总数-K+1。"""
+    s = sql or ""
+    off = k - 1
+    if off == 0:
+        # 倒数第一：总数-K+1 化简成 排名=总数，减号从 SQL 文本里消失，纯列名
+        # 等值就是唯一正确形态，必须放行；右侧限定非数字字面量（那是正数名次
+        # 的过滤，写错名次仍会被拦/被结果行名次复核拦下）。
+        return bool(re.search(rf"{_RANK_EQ_LEFT}\s*=\s*(?!\d)\w+", s, re.I))
+    if re.search(rf"{_RANK_EQ_LEFT}\s*=\s*\w+\s*-\s*{off}\b", s, re.I):
+        return True
+    if re.search(rf"{_RANK_EQ_LEFT}\s*=\s*\w+\s*-\s*{k}\s*\+\s*1", s, re.I):
+        return True
+    return bool(
+        re.search(
+            rf"{_RANK_EQ_LEFT}\s*=\s*COUNT\s*\(\s*\*\s*\)\s*OVER\s*\(\s*\)\s*-\s*{off}\b",
+            s,
+            re.I,
+        )
+    )
+
+
+def _nth_class_lookup_missing_asked_rank(sql: str, question: str | None) -> bool:
+    """全市第N找班却输出对照窗口或全市榜，未按名次过滤。"""
+    try:
+        from src.agent.education.query_parse import (
+            extract_asked_class_rank,
+            is_citywide_nth_class_lookup_query,
+        )
+    except Exception:
+        return False
+    q = question or ""
+    if not is_citywide_nth_class_lookup_query(q):
+        return False
+    if not _class_rank_sql_kind(sql, q):
+        return False
+    s = sql or ""
+    if re.search(r"\bBETWEEN\b", s, re.I):
+        return True
+    has_bj = bool(re.search(r"\b(?:bj|班级)\s*(?:=|LIKE)\s*'", s, re.I))
+    has_xx = bool(re.search(r"\b(?:xx|学校)\s*(?:=|LIKE)\s*'", s, re.I))
+    if has_bj and has_xx:
+        return True
+    asked = extract_asked_class_rank(q)
+    if not asked:
+        return False
+    kind, n = asked
+    if kind == "from_end":
+        if _rank_window_is_asc(s):
+            return True
+        if _sql_filters_rank_eq(s, n):
+            return True
+        if _sql_filters_from_end_rank(s, n):
+            return False
+        return True
+    stripped = re.sub(r"FILTER\s*\(\s*WHERE[^)]*\)", " ", s, flags=re.I)
+    if re.search(r"ORDER\s+BY[\s\S]{0,80}\bASC\b", stripped, re.I):
+        return True
+    if _sql_filters_rank_eq(s, n):
+        return False
+    return True
+
+
+_ELECTIVE_SUBJECTS = frozenset({"化学", "生物", "政治", "地理"})
+_ELECTIVE_HOMEROOM_POOL = 300
+
+
+def looks_like_nth_class_lookup_homeroom_pool(
+    columns: Sequence[object] | None,
+    rows: Sequence[Sequence[object]] | None,
+    question: str | None,
+) -> bool:
+    """再选科把行政班洗净数（约 300+）当成参赛班数。"""
+    try:
+        from src.agent.education.orchestrator import _extract_subject
+        from src.agent.education.query_parse import is_citywide_nth_class_lookup_query
+    except Exception:
+        return False
+    q = question or ""
+    if not is_citywide_nth_class_lookup_query(q):
+        return False
+    subject = (_extract_subject(q) or "").strip()
+    if subject not in _ELECTIVE_SUBJECTS:
+        return False
+    cols = [str(c or "") for c in (columns or [])]
+    pool_idxs = [i for i, c in enumerate(cols) if _is_city_pool_column(c)]
+    if not pool_idxs:
+        return False
+    for row in rows or []:
+        if row is None:
+            continue
+        for i in pool_idxs:
+            if i < len(row):
+                v = _cell_as_int(row[i])
+                if v is not None and v >= _ELECTIVE_HOMEROOM_POOL:
+                    return True
+    return False
+
+
+def looks_like_nth_class_lookup_wrong_rank(
+    columns: Sequence[object] | None,
+    rows: Sequence[Sequence[object]] | None,
+    question: str | None,
+) -> bool:
+    """结果行的名次不是用户要的第N（对照窗口/串班）。"""
+    try:
+        from src.agent.education.query_parse import (
+            extract_asked_class_rank,
+            is_citywide_nth_class_lookup_query,
+        )
+    except Exception:
+        return False
+    q = question or ""
+    if not is_citywide_nth_class_lookup_query(q):
+        return False
+    asked = extract_asked_class_rank(q)
+    if not asked:
+        return False
+    row_list = [list(r) for r in (rows or []) if r is not None]
+    if not row_list:
+        return False
+    cols = [str(c or "") for c in (columns or [])]
+    rank_idxs = [i for i, c in enumerate(cols) if _is_rank_result_column(c)]
+    kind, n = asked
+    expected = n
+    if kind == "from_end":
+        pool_idxs = [i for i, c in enumerate(cols) if _is_city_pool_column(c)]
+        pool_vals: list[int] = []
+        for row in row_list:
+            for i in pool_idxs:
+                if i < len(row):
+                    v = _cell_as_int(row[i])
+                    if v is not None:
+                        pool_vals.append(v)
+        if not pool_vals:
+            return len(row_list) >= 5
+        expected = max(pool_vals) - n + 1
+        if expected < 1:
+            return True
+    if not rank_idxs:
+        return len(row_list) >= 5
+    ranks: list[int] = []
+    for row in row_list:
+        for i in rank_idxs:
+            if i < len(row):
+                v = _cell_as_int(row[i])
+                if v is not None:
+                    ranks.append(v)
+    if not ranks:
+        return len(row_list) >= 5
+    return any(r != expected for r in ranks) or expected not in ranks
 
 
 def _class_alias_grouped_by_school_only(sql: str) -> bool:
@@ -1074,6 +1261,8 @@ __all__ = [
     "lint_edu_sql_blocks",
     "looks_like_collapsed_city_rank_result",
     "looks_like_cross_subject_mixed_pool",
+    "looks_like_nth_class_lookup_homeroom_pool",
+    "looks_like_nth_class_lookup_wrong_rank",
     "looks_like_running_count_as_school_pool",
     "looks_like_subject_mutual_rank_as_city_schools",
     "looks_like_unfiltered_city_leaderboard",

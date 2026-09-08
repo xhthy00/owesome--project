@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     llm_base_url: Optional[str] = None
     llm_api_key: Optional[str] = None
     llm_model: str = "gpt-4o-mini"
+    # 单次请求输出上限。不设置时各服务商默认值不一（MiniMax 等偏小），长 <think>
+    # + 工具调用 JSON 会被中途截断，导致 ReAct 解析连续失败。显式给宽裕值。
+    llm_max_tokens: int = 8192
+    # 思考模式控制：``disabled`` / ``adaptive``。仅部分模型支持（如 MiniMax-M3；
+    # M2.x 不可关闭）。留空不发送该参数，其他网关（GLM/Qwen 等）不受影响。
+    llm_thinking: Optional[str] = None
 
     # Team 模式编排：``legacy`` 为手写协程；``langgraph`` 为 LangGraph StateGraph（默认）。
     team_orchestrator: Literal["legacy", "langgraph"] = "langgraph"

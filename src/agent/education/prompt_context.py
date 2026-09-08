@@ -81,6 +81,7 @@ def build_education_sql_hint_text(question: str) -> str:
     rules: list[str] = []
     from src.agent.education.query_parse import (
         extract_school_type_target,
+        is_citywide_nth_class_lookup_query,
         is_class_city_rank_query,
         is_class_subject_city_rank_query,
         is_school_class_comparison_query,
@@ -105,6 +106,13 @@ def build_education_sql_hint_text(question: str) -> str:
             "物理类 xkkm LIKE '物%'，历史类 LIKE '史%' OR LIKE '历%'；"
             "GROUP BY xx,bj 后 RANK() OVER (ORDER BY 均分 DESC)，"
             "用学校 xx 与班级 bj 定位窗口。"
+        )
+    if is_citywide_nth_class_lookup_query(q):
+        rules.append(
+            "全市第N是哪个班：没有目标班；洗净其他校（xxlb NOT LIKE '%其他%'）和整班不足10人；"
+            "该科 FILTER col>0 且 HAVING 有效人数>=3；RANK 与 COUNT(*) OVER() 在进池后同一 SELECT；"
+            "外层 WHERE 全市排名=N，禁止第1名+前后3名窗口，禁止外层滤已知班；"
+            "化学/生物/政治/地理用 hxzh/swzh/zzzh/dlzh，禁止把行政班总数当再选科分母。"
         )
     if is_class_subject_city_rank_query(q):
         rules.append(

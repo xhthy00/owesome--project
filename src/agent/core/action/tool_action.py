@@ -77,12 +77,14 @@ _SQL_FACT_TASK_MARKERS = (
     "用 SQL 直接回答",
     "自由 SQL",
     "本题是优势/薄弱学科",
+    "全市第N名是哪个班",
 )
 
 _TERMINATE_WITHOUT_SQL_MSG = (
-    "本子任务必须先成功调用 execute_sql 拿到真实结果，再 terminate。"
-    "当前尚未执行 SQL；禁止用「—/待查询」占位表，禁止把未执行的 SQL 写进 final_answer。"
-    "请立即 execute_sql（先全市 GROUP BY xx 做 RANK，外层再 WHERE xx LIKE 目标校）。"
+    "本子任务必须先成功调用 execute_sql 拿到真实结果行，再 terminate。"
+    "SQL 语法失败或【SQL lint 拦截】都不算已查到；禁止把未执行的 SQL 代码块当结论，"
+    "禁止根据上一问或记忆编造班级/均分/名次。"
+    "请改写 SQL 后再 execute_sql（全市 GROUP BY xx,bj 做 RANK，外层 WHERE 排名=用户要的第N）。"
 )
 
 
@@ -93,13 +95,58 @@ def _sql_fact_task_requires_execute(sub_task: str) -> bool:
     return False
 
 
+def _looks_like_unexecuted_sql_dump(text: str) -> bool:
+    """把 SELECT/```sql 当 terminate 结论（会话 716 英语第一未查就收工）。"""
+    t = str(text or "").strip()
+    if not t:
+        return False
+    if re.search(r"```sql\b", t, re.I):
+        return True
+    if re.match(r"^(?:WITH|SELECT)\b", t, re.I) and re.search(r"\bFROM\b", t, re.I):
+        return True
+    return bool(re.search(r"\bSELECT\b[\s\S]{0,400}\bFROM\s+tb_", t, re.I))
+
+
+def _execute_sql_returned_rows(out: ActionOutput) -> bool:
+    """lint 拦截、SQL 报错、0 行都不算查到。"""
+    extra = getattr(out, "extra", None) or {}
+    data = extra.get("tool_data") if isinstance(extra, dict) else None
+    content = str(getattr(out, "content", "") or "")
+    if "【SQL lint 拦截】" in content or content.startswith("SQL 执行失败"):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("error") or data.get("lint_blocks"):
+        return False
+    rows = data.get("rows")
+    return isinstance(rows, list) and len(rows) > 0
+
+
 def _cache_has_successful_execute_sql(cache: dict[str, ActionOutput] | None) -> bool:
     if not isinstance(cache, dict):
         return False
     for out in cache.values():
-        if getattr(out, "action", None) == "execute_sql" and getattr(out, "is_exe_success", False):
+        if getattr(out, "action", None) != "execute_sql":
+            continue
+        if not getattr(out, "is_exe_success", False):
+            continue
+        if _execute_sql_returned_rows(out):
             return True
     return False
+
+
+def _fact_terminate_block_reason(
+    sub_task: str,
+    cache: dict[str, ActionOutput] | None,
+    final_answer: str | None = None,
+) -> str | None:
+    if not _sql_fact_task_requires_execute(sub_task):
+        return None
+    if _looks_like_unexecuted_sql_dump(final_answer or ""):
+        return _TERMINATE_WITHOUT_SQL_MSG
+    if not _cache_has_successful_execute_sql(cache):
+        return _TERMINATE_WITHOUT_SQL_MSG
+    return None
 
 #: 这些工具禁止 LLM 手填超长表格入参（易截断 JSON）；改由 bindings / 上游 SQL 注入。
 _STRIP_TABLE_ARGS_TOOLS = frozenset(
@@ -337,6 +384,9 @@ class ToolAction(Action):
             # 太短通常是噪声，不作为最终答案。
             if len(cleaned) < 24:
                 return None
+            # 未走 execute_sql 的 SQL 正文不能当结论（会让 Summarizer 沿用上一问班级）。
+            if _looks_like_unexecuted_sql_dump(cleaned):
+                return None
             return cleaned
 
         def _parse_tool_call_fallback(raw_text: str) -> dict[str, Any] | None:
@@ -366,6 +416,30 @@ class ToolAction(Action):
 
         constraints = kwargs.get("constraints") if isinstance(kwargs.get("constraints"), dict) else {}
         sub_task = str(kwargs.get("sub_task") or "")
+        cache_pre = kwargs.get("tool_call_cache")
+        tool_cache = cache_pre if isinstance(cache_pre, dict) else None
+
+        def _maybe_block_fact_terminate(
+            final_answer: str | None,
+            thoughts: str | None = None,
+        ) -> ActionOutput | None:
+            reason = _fact_terminate_block_reason(sub_task, tool_cache, final_answer)
+            if not reason:
+                return None
+            _audit(
+                tool_name=TERMINATE_TOOL_NAME,
+                success=False,
+                args={"final_answer": final_answer} if final_answer else None,
+                result_preview=reason,
+            )
+            return ActionOutput(
+                is_exe_success=False,
+                content=reason,
+                action=TERMINATE_TOOL_NAME,
+                thoughts=thoughts,
+                observations=reason,
+                terminate=False,
+            )
 
         async def _invoke_report_rescue(
             tool_name: str, *, thoughts: str | None = None
@@ -437,6 +511,9 @@ class ToolAction(Action):
                     if rescued is not None:
                         return rescued
                 fallback_answer = _extract_non_json_final_answer(ai_message)
+                blocked = _maybe_block_fact_terminate(fallback_answer or ai_message)
+                if blocked is not None:
+                    return blocked
                 if fallback_answer and TERMINATE_TOOL_NAME in self.tool_pack:
                     try:
                         result = await self.tool_pack.invoke(
@@ -503,6 +580,9 @@ class ToolAction(Action):
             # 兜底：模型直接返回一段报告正文/自然语言（字符串标量）时，
             # 作为最终答案 terminate，避免连续失败循环。
             if isinstance(parsed, str) and parsed.strip() and TERMINATE_TOOL_NAME in self.tool_pack:
+                blocked = _maybe_block_fact_terminate(parsed.strip())
+                if blocked is not None:
+                    return blocked
                 try:
                     result = await self.tool_pack.invoke(
                         TERMINATE_TOOL_NAME,
@@ -594,6 +674,9 @@ class ToolAction(Action):
                         break
             if isinstance(final_answer, str) and final_answer.strip() and TERMINATE_TOOL_NAME in self.tool_pack:
                 final_text = final_answer.strip()
+                blocked = _maybe_block_fact_terminate(final_text, thoughts)
+                if blocked is not None:
+                    return blocked
                 try:
                     result = await self.tool_pack.invoke(
                         TERMINATE_TOOL_NAME,
@@ -642,22 +725,14 @@ class ToolAction(Action):
             )
 
         tool_name_str = str(tool_name)
-        # SQL 事实子任务：禁止 peek 后直接 terminate（会产出「待查询/0行」空表）
+        # SQL 事实子任务：禁止 peek / 贴 SQL 后直接 terminate
         if tool_name_str == TERMINATE_TOOL_NAME:
-            cache_pre = kwargs.get("tool_call_cache")
-            if _sql_fact_task_requires_execute(sub_task) and not _cache_has_successful_execute_sql(
-                cache_pre if isinstance(cache_pre, dict) else None
-            ):
-                msg = _TERMINATE_WITHOUT_SQL_MSG
-                _audit(tool_name=tool_name_str, success=False, args=args, result_preview=msg)
-                return ActionOutput(
-                    is_exe_success=False,
-                    content=msg,
-                    action=tool_name_str,
-                    thoughts=thoughts,
-                    observations=msg,
-                    terminate=False,
-                )
+            fa = args.get("final_answer") if isinstance(args, dict) else None
+            blocked = _maybe_block_fact_terminate(
+                fa if isinstance(fa, str) else None, thoughts
+            )
+            if blocked is not None:
+                return blocked
 
         # 综合/学生报告：丢掉手填 records（易截断），只保留 class_name 等轻量参数
         if tool_name_str in _STRIP_TABLE_ARGS_TOOLS:

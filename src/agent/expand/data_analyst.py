@@ -115,9 +115,14 @@ DATA_ANALYST_DESC = """[分析范围约束]
    班级全市排名：`RANK() OVER (ORDER BY 均分 DESC)` + `COUNT(*) OVER()`，
    **禁止** `PARTITION BY bj`，**禁止** `COUNT(DISTINCT bj)`（班名全市重复，不是班级数）。
    问句点名引领/支撑/发展校时对照池必须 `xxlb LIKE '%该类%'`，禁止只用排除其他校的全市池。
-   六门班级全市排名查询结果须含第1名+目标班前后各3名并标记本班；
+   「全市第N是哪个班」没有目标班：禁止第1名+前后3名窗口，外层 WHERE 排名=N，
+   倒数第K必须 RANK DESC 后 WHERE 排名=参赛班数-K+1，禁止 ASC 再取总数-1（会变成正数第K）；
+   lint 拦截或 SQL 失败后禁止 terminate 编造。
+   `terminate` 只照抄该名次行的学校/班级/均分/名次/参赛班数；校名去掉 A01/B07 等校码。
+   再选科目参赛班数须是该科进池后的 COUNT(*) OVER()，禁止用整班洗净数（约 300+）。
+   点名班级的六门全市排名查询结果须含第1名+目标班前后各3名并标记本班；
    `terminate` 只写目标班两个口径的名次/总数/均分，不要把附近班整表贴进结论。
-   单科全市班级排名还须洗净其他校（`xxlb NOT LIKE '%其他%'`）和整班不足 10 人，
+   点名班级的单科全市排名还须洗净其他校（`xxlb NOT LIKE '%其他%'`）和整班不足 10 人，
    该科有效人数 `>= 3` 才进池，`RANK() OVER (ORDER BY 均分 DESC NULLS LAST)`；
    查询结果须含第1名+目标班前后各3名并标记本班，禁止外层只留下目标班一行；
    `terminate` 只写目标班均分与第几/共几班；名次/总数≤25% 称前列，禁止称中上段。
@@ -216,6 +221,7 @@ class DataAnalystAgent(ReActAgent):
             "输出严格遵守 JSON 协议",
             "结论必须以工具执行结果为依据，不得臆造数据",
             "terminate 的 final_answer 面向用户：禁止表名、SQL、FILTER、工具名、代码块",
+            "禁止把未执行的 SQL 代码块当作 terminate 结论",
             "各科/对比/排名等小表须用 Markdown 表格保留，禁止压成一句话",
         ],
         desc=DATA_ANALYST_DESC,

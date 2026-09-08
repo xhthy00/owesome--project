@@ -1026,3 +1026,56 @@ def test_subject_strength_uses_citywide_rank_not_intra_school():
         {"edu_role": "bureau_admin"},
     )
     assert SLOT_CLASS not in cand
+
+
+def test_named_district_line_reach_skips_class_school():
+    """区县达线率是完整范围：指定考试后不再追问班/校；「地区」不误抽。"""
+    from src.agent.education.clarification import (
+        SLOT_CLASS,
+        SLOT_EXAM,
+        SLOT_SCHOOL,
+        candidate_missing_slots,
+        extract_filled_slots,
+    )
+    from src.agent.education.intent_router import classify_report_intent_sync
+    from src.agent.education.query_parse import (
+        extract_district_target,
+        is_line_reach_report_query,
+        is_named_district_scope,
+    )
+
+    assert extract_district_target("宝应地区本科达线率") == "宝应"
+    assert extract_district_target("2026届高三1月期末宝应地区本科达线率") == "宝应"
+    assert extract_district_target("邗江区本科达线率") == "邗江区"
+    assert extract_district_target("宝应县本科达线率") == "宝应县"
+    assert extract_district_target("宝应本科达线率") == "宝应区"
+    assert extract_district_target("物理类本科达线率") is None
+    assert extract_district_target("全市2026届高三1月期末本科达线率") is None
+    assert is_named_district_scope("宝应地区本科达线率") is True
+    assert is_line_reach_report_query("宝应地区本科达线率") is False
+
+    bureau = {"edu_role": "bureau_admin"}
+    q_exam = "宝应地区2026届高三1月期末本科达线率"
+    route = classify_report_intent_sync(q_exam)
+    assert route.needs_report is False
+    filled = extract_filled_slots(q_exam, bureau)
+    miss = candidate_missing_slots(route, q_exam, filled, bureau)
+    assert SLOT_CLASS not in miss
+    assert SLOT_SCHOOL not in miss
+    assert SLOT_EXAM not in miss
+
+    q_no_exam = "邗江区本科达线率"
+    filled2 = extract_filled_slots(q_no_exam, bureau)
+    miss2 = candidate_missing_slots(
+        classify_report_intent_sync(q_no_exam), q_no_exam, filled2, bureau
+    )
+    assert miss2 == [SLOT_EXAM]
+
+    rank_q = "邗江区2026届高三1月期末排名"
+    miss_rank = candidate_missing_slots(
+        classify_report_intent_sync(rank_q),
+        rank_q,
+        extract_filled_slots(rank_q, bureau),
+        bureau,
+    )
+    assert SLOT_CLASS in miss_rank or SLOT_SCHOOL in miss_rank

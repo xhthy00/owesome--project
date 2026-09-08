@@ -2360,6 +2360,7 @@ def _format_sub_tasks_block(
     的 sub_task 也列出来并附上失败原因，让 Summarizer 知道哪些维度没拿到数据。
     ToolExpert 子任务额外注入小题/知识点/报告产出摘要。
     """
+    from src.agent.core.action.tool_action import _looks_like_unexecuted_sql_dump
     from src.agent.education.summary_context import (
         extract_stats_authority_block,
         format_education_pipeline_footer,
@@ -2415,8 +2416,15 @@ def _format_sub_tasks_block(
             )
         # DataAnalyst 的 terminate 结论也注入（保留 KPI 行），避免只剩样例表
         final_ans = (phase.reply.content if phase.reply else "") or ""
+        sql_dump = _looks_like_unexecuted_sql_dump(final_ans)
         final_snip = ""
-        if final_ans.strip() and not is_tool_expert:
+        if fact_answer and row_count <= 0:
+            final_snip = (
+                "\n查询结论：本轮没有成功查出的结果表"
+                "（terminate 里的 SQL 代码块不算结果）。"
+                "禁止沿用上一问班级/均分，禁止根据未执行 SQL 编造名次。\n"
+            )
+        elif final_ans.strip() and not is_tool_expert and not sql_dump:
             if fact_answer:
                 final_snip = (
                     "\n查询结论（事实问答：优先照抄其中的 student_id/分数等直接答案；"

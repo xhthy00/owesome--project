@@ -21,6 +21,8 @@ class OpenAILLM:
         base_url: Optional[str] = None,
         temperature: float = 0,
         timeout: int = 120,
+        max_tokens: Optional[int] = None,
+        thinking: Optional[str] = None,
         **kwargs
     ):
         self.model = model or "gpt-4o-mini"
@@ -28,16 +30,24 @@ class OpenAILLM:
         self.base_url = base_url or settings.llm_base_url
         self.temperature = temperature
         self.timeout = timeout
+        self.max_tokens = max_tokens if max_tokens is not None else settings.llm_max_tokens
+        self.thinking = thinking if thinking is not None else settings.llm_thinking
         self.extra_params = kwargs
 
         # Create LangChain chat model
+        llm_kwargs = dict(kwargs)
+        if isinstance(self.max_tokens, int) and self.max_tokens > 0:
+            llm_kwargs["max_tokens"] = self.max_tokens
+        # thinking 是 MiniMax-M3 等模型的专有参数，显式配置才发送，避免其他网关 400。
+        if self.thinking in ("disabled", "adaptive"):
+            llm_kwargs["extra_body"] = {"thinking": {"type": self.thinking}}
         self._llm = ChatOpenAI(
             model=self.model,
             api_key=self.api_key,
             base_url=self.base_url,
             temperature=self.temperature,
             timeout=self.timeout,
-            **kwargs
+            **llm_kwargs
         )
 
     def chat(self, messages: List, **kwargs) -> str:

@@ -617,6 +617,57 @@ def _class_subject_city_rank_fact_hint(question: str) -> str:
     )
 
 
+def _nth_class_lookup_fact_hint(question: str) -> str:
+    """全市第N是哪个班：按名次过滤，禁止目标班窗口，分母须在该科进池之后。"""
+    from src.agent.education.orchestrator import _extract_subject
+    from src.agent.education.query_parse import extract_asked_class_rank
+
+    subject = (_extract_subject(question) or "").strip()
+    col = _SUBJECT_AVG_COL.get(subject, "")
+    asked = extract_asked_class_rank(question)
+    if asked and asked[0] == "from_end":
+        k = asked[1]
+        rank_txt = (
+            f"倒数第{k}：RANK 必须从高到低（DESC，第1=最好），"
+            f"外层 WHERE 全市排名 = 参赛班数 - {k - 1}。"
+            f"禁止 ORDER BY 均分 ASC（ASC 再取总数-1 会变成正数第{k}名）。"
+            f"禁止 WHERE 排名 = {k}（那是正数第{k}）。"
+        )
+    elif asked:
+        rank_txt = f"外层 WHERE 全市排名 = {asked[1]}（并列则多行）"
+    else:
+        rank_txt = "外层按用户要的名次过滤（第N / 倒数第K）"
+    if col:
+        col_txt = (
+            f"{subject}用 {col}；AVG({col}) FILTER (WHERE {col} > 0)，"
+            f"HAVING COUNT(*) FILTER (WHERE {col} > 0) >= 3"
+        )
+    else:
+        col_txt = (
+            "未点名单科时用六门 zf6m；HAVING COUNT(*) FILTER (WHERE zf6m > 0) >= 3"
+        )
+    elective = subject in {"化学", "生物", "政治", "地理"}
+    denom = (
+        "RANK() 与 COUNT(*) OVER() 必须写在该科 HAVING 之后的同一 SELECT；"
+        "禁止把整班洗净数（语数那种全员行政班）当成再选科目参赛班数。"
+        if elective
+        else "RANK() 与 COUNT(*) OVER() 写在进池之后的同一 SELECT。"
+    )
+    return (
+        "本题是「全市第N名是哪个班」，没有目标班："
+        "禁止套用「第1名+目标班前后各3名」窗口，禁止外层 WHERE xx+bj 去碰已知班。"
+        f"{col_txt}。"
+        "排名池先洗：xxlb NOT LIKE '%其他%'，整班 HAVING COUNT(*)>=10；"
+        f"{denom}"
+        "GROUP BY xx,bj；RANK() OVER (ORDER BY 均分 DESC NULLS LAST)；禁止 PARTITION BY bj。"
+        f"{rank_txt}。"
+        "禁止用 ORDER BY 均分 ASC / LIMIT OFFSET 计算倒数。"
+        "结果只返回该名次行，列：学校、班级、均分、全市排名、参赛班数。"
+        "execute_sql 被 lint 拦截或报错时禁止 terminate；必须改写到查出该名次行再照抄。"
+        "面向用户禁止字段名与 A01/B07 等校码。"
+    )
+
+
 def _school_vs_school_type_avg_hint(school: str, school_type: str, subject: str) -> str:
     """点名学校 vs 引领/支撑/发展校：学生加权均分，校类用 overview.xxlb。"""
     label = f"{school_type}校" if school_type else "该校类"
@@ -652,6 +703,7 @@ def build_fact_query_plan_items(question: str) -> list[dict[str, str]]:
         extract_district_target,
         extract_school_target,
         extract_school_type_target,
+        is_citywide_nth_class_lookup_query,
         is_class_city_rank_query,
         is_class_subject_city_rank_query,
         is_item_difficulty_curve_query,
@@ -757,6 +809,8 @@ def build_fact_query_plan_items(question: str) -> list[dict[str, str]]:
     class_rank_hint = ""
     if is_subject_strength_query(q):
         strength_hint = _subject_strength_fact_hint(class_name)
+    elif is_citywide_nth_class_lookup_query(q):
+        class_rank_hint = _nth_class_lookup_fact_hint(q)
     elif is_class_city_rank_query(q):
         class_rank_hint = _class_city_rank_fact_hint(q)
     elif is_class_subject_city_rank_query(q):

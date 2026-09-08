@@ -544,7 +544,10 @@ def candidate_missing_slots(
         has_class_alias,
         is_bureau_report_query,
         is_citywide_analysis_query,
+        is_citywide_nth_class_lookup_query,
+        is_named_district_scope,
         is_school_class_comparison_query,
+        is_which_class_lookup_query,
     )
 
     q = question or ""
@@ -612,18 +615,31 @@ def candidate_missing_slots(
         # 只看问句：教师/校管的 school_name 可能来自绑定权限而非用户表达，不能当作
         # 用户主动限定了范围。问句带口语班级线索（我们班/三班）时仍需澄清。
         school_scoped = bool(extract_school_target(q)) and not has_class_alias(q)
-        for slot in REQUIRED_SLOTS_BY_FACT.get(fact_query_kind(q), ()):
+        kind = fact_query_kind(q)
+        # 达线已点名邗江区/宝应地区：范围是区县，不再追问班/校。不并入
+        # _has_wide_scope，以免排名/均分等其它口径被放开。
+        district_scoped = (
+            kind == FactQueryKind.LINE_REACH
+            and is_named_district_scope(q)
+            and not has_class_alias(q)
+        )
+        for slot in REQUIRED_SLOTS_BY_FACT.get(kind, ()):
             if slot == SLOT_EXAM:
                 if _exam_missing(q, filled_map):
                     add(SLOT_EXAM)
             elif slot == SLOT_CLASS:
                 # 老师只绑 1 班：静默继承，不追问；学生只看自己
-                if skip_class or school_scoped or role == "student":
+                if skip_class or school_scoped or district_scoped or role == "student":
+                    continue
+                if is_which_class_lookup_query(q):
                     continue
                 if not (role == "teacher" and len(bound_classes) == 1):
                     add(SLOT_CLASS)
             elif slot == SLOT_SCHOOL:
-                if skip_class:
+                if skip_class or district_scoped:
+                    continue
+                # 全市第N是哪个班：学校是答案，不是筛选范围
+                if is_citywide_nth_class_lookup_query(q):
                     continue
                 bound = _bound_school(edu)
                 if not bound or role not in ("teacher", "school_admin", "student"):
