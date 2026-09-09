@@ -45,3 +45,44 @@ def test_heatmap_chart():
     )
     opt = json.loads(raw)
     assert opt["series"][0]["type"] == "heatmap"
+
+
+def test_comprehensive_subject_compare_chart_has_all_subjects():
+    """对比柱图必须以考试为系列、科目为类目，否则后部科目会空白。"""
+    from src.agent.education.comprehensive import build_comprehensive_data
+
+    records = [
+        {
+            "exam": "期末",
+            "student": "甲",
+            "subjects": {
+                "物理": 90,
+                "数学": 130,
+                "化学": 80,
+                "生物": 70,
+                "英语": 120,
+                "语文": 110,
+            },
+            "total": 600,
+        },
+        {
+            "exam": "2026届高三3月",
+            "student": "甲",
+            "subjects": {
+                "物理": 92,
+                "数学": 128,
+                "化学": 82,
+                "生物": 72,
+                "英语": 122,
+                "语文": 112,
+            },
+            "total": 608,
+        },
+    ]
+    data = build_comprehensive_data(records, ["期末", "2026届高三3月"], class_name="高三(1)班")
+    opt = json.loads(data["SUBJECT_COMPARE_CHART"])
+    assert opt["xAxis"]["data"] == ["物理", "数学", "化学", "生物", "英语", "语文"]
+    assert {s["name"] for s in opt["series"]} == {"期末", "2026届高三3月"}
+    assert all(len(s["data"]) == 6 for s in opt["series"])
+    assert all(s["data"][4] > 0 and s["data"][5] > 0 for s in opt["series"])
+

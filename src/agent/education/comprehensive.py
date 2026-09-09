@@ -702,7 +702,6 @@ def build_comprehensive_data(
 
     # ---- S2 各科成绩趋势 ----
     subject_trend_series = []
-    subject_compare_metrics = []
     subject_kpi_cards: list[str] = []
     for sub in subjects:
         per_exam_avg: list[float] = []
@@ -712,7 +711,6 @@ def build_comprehensive_data(
                     if (r.get("subjects") or {}).get(sub) is not None]
             per_exam_avg.append(round(sum(vals) / len(vals), 1) if vals else 0)
         subject_trend_series.append({"name": sub, "values": per_exam_avg})
-        subject_compare_metrics.append({"name": sub, "values": per_exam_avg})
         if len(per_exam_avg) >= 2:
             d = per_exam_avg[-1] - per_exam_avg[0]
             accent = "accent1" if d < 0 else "accent2"
@@ -726,8 +724,22 @@ def build_comprehensive_data(
         {"x_labels": [_short_exam_label(e) for e in exams], "series": subject_trend_series},
         "历次考试班级各科平均分趋势",
     )
+    # 对比柱图：X=科目，系列=各次考试（不可把科目当系列，否则 values 长度=考试数，
+    # 只会填满前几个科目类目，语文/英语等后面的科目会空白）。
+    subject_compare_metrics = []
+    for i, e in enumerate(exams):
+        values = [
+            float((s.get("values") or [0] * (i + 1))[i] or 0)
+            for s in subject_trend_series
+            if s.get("name") != "总分"
+        ]
+        subject_compare_metrics.append(
+            {"name": _short_exam_label(e), "values": values}
+        )
     subject_compare_chart = build_chart_option(
-        "subject_bar", {"subjects": subjects, "metrics": subject_compare_metrics}, "历次考试班级各科平均分对比"
+        "subject_bar",
+        {"subjects": subjects, "metrics": subject_compare_metrics},
+        "历次考试班级各科平均分对比",
     )
     # 洞察：找下降最多和上升最多的科目
     subject_deltas = [(sub, per[-1] - per[0]) for sub, per in

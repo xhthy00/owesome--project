@@ -381,24 +381,21 @@ async def maybe_clarify_turn(
     # 学生本人学号），那些 LLM 看不到；问句里明说的值以 LLM 为准。
     current_filled = extract_filled_slots(request.question, edu)
     current_filled.update(sanitize_llm_slots(intent.slots))
-    turn_ctx = load_turn_context(request.conversation_id, current_user_id, edu)
-    filled = _canonicalize_filled_slots(
-        merge_inherited_slots(current_filled, turn_ctx.inherited, request.question)
-    )
-    turn_ctx = (
-        load_turn_context(request.conversation_id, current_user_id, edu)
-        if should_inherit
-        else None
-    )
-    filled = (
-        merge_inherited_slots(current_filled, turn_ctx.inherited, request.question)
-        if turn_ctx is not None
-        else current_filled
-    )
+    if should_inherit:
+        turn_ctx = load_turn_context(request.conversation_id, current_user_id, edu)
+        filled = merge_inherited_slots(
+            current_filled, turn_ctx.inherited, request.question
+        )
+    else:
+        filled = dict(current_filled)
+    filled = _canonicalize_filled_slots(filled)
     extra = extra_inherited_slots(current_filled, filled)
     # user_input 是 LLM 补全后的完整指令；「补充：标签=值」标记必须保留——
     # 下游 sub_task 与工具会对 user_question 做正则抽取，纯改写会打断这条链路。
-    base_question = intent.user_input if intent.ok and intent.user_input else request.question
+    # 有确定性继承槽时保留用户原问，避免 LLM user_input 中的模糊/缩写值覆盖真值。
+    base_question = request.question
+    if not extra and intent.ok and intent.user_input:
+        base_question = intent.user_input
     effective_question = apply_inherited_supplements(base_question, extra)
     _apply_filled(constraints, filled)
     candidates = candidate_missing_slots(route, request.question, filled, edu)
@@ -478,7 +475,6 @@ async def maybe_clarify_turn(
         filled=filled,
         route=route,
         persist_question=persist_question,
-        effective_question=effective_question,
         intent=intent,
     )
     halted.effective_question = effective_question
@@ -533,6 +529,7 @@ async def _emit_and_persist_clarify(
         constraints=constraints,
         filled=filled,
         route=route,
+        effective_question=effective_question,
         persist_question=persist_question,
         effective_question=effective_question,
         pending_payload=payload,

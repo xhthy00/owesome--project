@@ -151,6 +151,22 @@ def merge_inherited_slots(
     inh_school = str((inherited or {}).get(SLOT_SCHOOL) or "").strip()
     if cur_school and not cur_class and inh_school != cur_school:
         out.pop(SLOT_CLASS, None)
+    # 本句明确缩小到学校/班级/学生时，不能继续携带上一轮的全市/全校范围。
+    # 反过来，本句明确给出宽范围时，也不能残留上一轮的更窄对象。
+    cur_scope = str((current or {}).get(SLOT_SCOPE) or "").strip()
+    if cur_scope == "全市":
+        out.pop(SLOT_SCHOOL, None)
+        out.pop(SLOT_CLASS, None)
+        out.pop(SLOT_STUDENT, None)
+    elif cur_scope == "全校":
+        out.pop(SLOT_CLASS, None)
+        out.pop(SLOT_STUDENT, None)
+    elif any(str((current or {}).get(slot) or "").strip() for slot in (
+        SLOT_SCHOOL,
+        SLOT_CLASS,
+        SLOT_STUDENT,
+    )):
+        out.pop(SLOT_SCOPE, None)
     return out
 
 
@@ -220,6 +236,10 @@ def is_follow_up_question(question: str) -> bool:
     if not q or is_explicit_new_question(q):
         return False
     if any(hint in q for hint in _FOLLOW_UP_HINTS):
+        return True
+    from src.agent.education.query_parse import refers_to_unspecified_exam
+
+    if refers_to_unspecified_exam(q):
         return True
     return len(q) <= 12 and bool(re.search(r"(多少|谁|如何|怎样|排名|均分|及格|优秀|最高|最低)", q))
 
@@ -326,8 +346,10 @@ async def _rewrite_follow_up(
         },
     ]
     try:
+        from src.agent.util.tool_call_parser import strip_think_blocks
+
         result = await llm_client.chat(messages)
-        rewritten = str(result or "").strip().strip("`").strip()
+        rewritten = strip_think_blocks(str(result or "")).strip().strip("`").strip()
         if rewritten and len(rewritten) <= 1000:
             return rewritten
     except Exception as exc:  # noqa: BLE001
@@ -386,7 +408,9 @@ async def resolve_turn_context(
     merged = merge_inherited_slots(current_slots, turn_ctx.inherited, original)
     extra = extra_inherited_slots(current_slots, merged)
     resolved = apply_inherited_supplements(current, extra)
-    if resolved == current:
+    # 闸门可能已经用确定性槽位把原问补成自包含问题；此时不能再交给 LLM
+    # 二次改写，否则模型推理文本或近似值会覆盖已绑定真值。
+    if resolved == current and current == original:
         resolved = await _rewrite_follow_up(current, turn_ctx.brief, llm_client)
     # 只有无法改写成独立问题时才给单 Agent 一个短背景兜底；正常路径不把历史
     # 继续传给执行 Agent。

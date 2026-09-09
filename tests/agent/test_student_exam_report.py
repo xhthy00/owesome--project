@@ -269,11 +269,27 @@ def test_report_participant_count_conflicts_detects_mismatch():
 
 
 def test_extract_exam_name_hint_rejects_vague_zhe_jici():
-    from src.agent.education.query_parse import extract_exam_name_hint, is_vague_exam_name
+    from src.agent.education.query_parse import (
+        extract_exam_name_hint,
+        is_vague_exam_name,
+        refers_to_unspecified_exam,
+    )
 
     assert extract_exam_name_hint("分析学生001这几次的数学考试成绩") is None
     assert is_vague_exam_name("这几次") is True
     assert is_vague_exam_name("这几次考试") is True
+    for reference in (
+        "这次考试",
+        "这场考试",
+        "本场考试",
+        "刚才的考试",
+        "前面提到的那场考试",
+        "上述考试",
+        "同一场考试",
+    ):
+        assert is_vague_exam_name(reference) is True
+        assert refers_to_unspecified_exam(f"{reference}扬州中学达线人数") is True
+        assert extract_exam_name_hint(f"{reference}扬州中学达线人数") is None
     assert is_vague_exam_name("连淮扬镇") is False
 
 

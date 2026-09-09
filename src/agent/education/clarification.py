@@ -155,12 +155,31 @@ _PROMPT_BY_SLOT = {
 }
 
 
-def _prompt_for_slot(slot: str, filled: Mapping[str, str] | None = None) -> str:
+def _prompt_for_slot(
+    slot: str,
+    filled: Mapping[str, str] | None = None,
+    question: str = "",
+) -> str:
     filled_map = dict(filled or {})
     if slot == SLOT_SCHOOL:
         cls = str(filled_map.get(SLOT_CLASS) or "").strip()
         if cls:
             return f"请确认是哪所学校的{cls}？同名班级可能出现在多所学校。"
+    if slot == SLOT_EXAM:
+        q = question or ""
+        from src.agent.education.query_parse import is_citywide_analysis_query, is_rank_query
+
+        # 全市班级排名未点名届/年级时，考试追问需点明「届别+年级」，避免 Agent 默选某一届。
+        if (
+            is_rank_query(q)
+            and "班" in q
+            and (is_citywide_analysis_query(q) or "全市" in q)
+            and not re.search(r"\d{4}届|高[一二三]|初[一二三]", q)
+        ):
+            return (
+                "全市班级排名需确认考试名称（含届别与年级）。"
+                "请直接回复考试专名，例如「2026届高三1月期末」。"
+            )
     return _PROMPT_BY_SLOT.get(slot, "请补充分析范围后再试。")
 
 
@@ -680,7 +699,7 @@ def fallback_clarification(
     if slot == SLOT_SCOPE and not opts:
         opts = list(_SCOPE_OPTIONS)
     return ClarificationNeed(
-        prompt=_prompt_for_slot(slot, filled),
+        prompt=_prompt_for_slot(slot, filled, question),
         missing=[slot],
         options=opts,
         filled=dict(filled),
@@ -774,7 +793,7 @@ async def judge_clarification(
         opts = list(options_by_slot.get(slot) or [])
     elif slot == SLOT_SCOPE:
         opts = list(_SCOPE_OPTIONS)
-    prompt = _prompt_for_slot(slot, filled_map)
+    prompt = _prompt_for_slot(slot, filled_map, question)
     ask = (llm_ask_user or "").strip().strip('"').strip("'")
     if ask and len(ask) <= 120:
         prompt = ask

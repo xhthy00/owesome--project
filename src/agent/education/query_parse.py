@@ -345,6 +345,18 @@ def _clean_exam_name_candidate(raw: str) -> str | None:
     return name
 
 
+_EXAM_ANAPHORA_PATTERN = (
+    r"(?:"
+    r"(?:这|本|该|此|那|同一|同)(?:次|场)(?:考试|测试|检测)?"
+    r"|(?:刚才|方才|前面|上面|上述)"
+    r"(?:提到|说到|分析过|查询过)?的?"
+    r"(?:那|这|该)?(?:次|场)?(?:考试|测试|检测)?"
+    r")"
+)
+_EXAM_ANAPHORA_RE = re.compile(_EXAM_ANAPHORA_PATTERN)
+_EXAM_ANAPHORA_VALUE_RE = re.compile(rf"^{_EXAM_ANAPHORA_PATTERN}$")
+
+
 def is_vague_exam_name(name: str) -> bool:
     """是否为不可用于 SQL 过滤的模糊考试表述（这几次/本次考试等）。"""
     n = str(name or "").strip()
@@ -354,10 +366,15 @@ def is_vague_exam_name(name: str) -> bool:
         "本次",
         "该次",
         "此次",
+        "这次",
+        "这场",
         "一次",
         "哪次",
         "本次考试",
         "该次考试",
+        "此次考试",
+        "这次考试",
+        "这场考试",
         "这几次",
         "最近几次",
         "这几场",
@@ -389,8 +406,10 @@ def is_vague_exam_name(name: str) -> bool:
         return True
     if re.fullmatch(r"(?:历次|多次|各次|各场|所有|全部)(?:考试)?", n):
         return True
-    # 「扬州中学本次」这类：学校名 + 指代，不是考试专名
-    if re.search(r"(?:本次|该次|此次|这次)$", n):
+    if _EXAM_ANAPHORA_VALUE_RE.fullmatch(n):
+        return True
+    # 「扬州中学本场」这类：前缀不是考试专名，末尾仍只是指代。
+    if re.search(rf"{_EXAM_ANAPHORA_PATTERN}$", n):
         return True
     # 「看看期中考试」「期中考试成绩」——仅泛化词，无专名场次
     core = re.sub(
@@ -419,26 +438,12 @@ def is_vague_exam_name(name: str) -> bool:
     return False
 
 
-_UNSPECIFIED_EXAM_HINTS = (
-    "本次考试",
-    "这场考试",
-    "这次考试",
-    "该次考试",
-    "此次考试",
-    "这次",
-    "这场",
-    "本次",
-    "那次",
-    "那场",
-)
-
-
 def refers_to_unspecified_exam(question: str) -> bool:
-    """问句用「本次/这场/这次」指代，但没有可过滤的考试专名。"""
+    """问句用考试指代语，但没有可过滤的考试专名。"""
     q = (question or "").strip()
     if not q:
         return False
-    if not any(h in q for h in _UNSPECIFIED_EXAM_HINTS):
+    if not _EXAM_ANAPHORA_RE.search(q):
         return False
     hint = extract_exam_name_hint(q)
     return not hint or is_vague_exam_name(hint)
@@ -653,8 +658,18 @@ _RANK_HINTS = (
     "全校第一",
     "冠军",
     "最高者",
+    "倒数",
+    "垫底",
+    "末位",
+    "最差",
 )
 _ORDINAL_ITEM_RE = re.compile(r"第\s*[一二三四五六七八九十百\d]+\s*(?:小题|题)")
+_TOP_PERSON_RE = re.compile(r"第一\s*(?:是谁|的(?:学生|同学|班级|班)|$)")
+_ORDINAL_RANK_RE = re.compile(
+    r"(?:倒数)?第\s*[一二三四五六七八九十百\d]+\s*名"
+    r"|倒数\s*[一二三四五六七八九十百\d]+"
+    r"|第\s*[一二三四五六七八九十百\d]+\s*的?(?:班级|班)(?!级)"
+)
 _TOP_PERSON_RE = re.compile(r"第一\s*(?:是谁|的(?:学生|同学)|$)")
 #: 「班级第一 / 哪个班最好」口语，不含「第一次」「第一中学」
 _RANK_ORDINAL_RE = re.compile(
@@ -681,6 +696,11 @@ def is_rank_query(question: str) -> bool:
         return False
     # “第一小题”是题号，不是名次；先移除题号片段再匹配“第一”等排名表达。
     q = _ORDINAL_ITEM_RE.sub("", q)
+    return (
+        any(h in q for h in _RANK_HINTS)
+        or bool(_TOP_PERSON_RE.search(q))
+        or bool(_ORDINAL_RANK_RE.search(q))
+    )
     if any(h in q for h in _RANK_HINTS):
         return True
     if _TOP_PERSON_RE.search(q):
@@ -2823,7 +2843,6 @@ def report_matches_student(title: str, html: str, target: str) -> bool:
 __all__ = [
     "build_edu_aware_constraints",
     "extract_district_target",
-    "is_named_district_scope",
     "extract_exam_name_hint",
     "extract_school_target",
     "peel_rhetorical_school_suffix",
@@ -2845,9 +2864,6 @@ __all__ = [
     "is_line_reach_query",
     "is_score_stat_query",
     "is_rank_query",
-    "is_which_class_lookup_query",
-    "extract_asked_class_rank",
-    "is_citywide_nth_class_lookup_query",
     "is_class_city_rank_query",
     "is_class_subject_city_rank_query",
     "class_city_rank_answer_mode",
